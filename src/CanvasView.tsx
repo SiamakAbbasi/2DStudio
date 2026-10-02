@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   basePose,
   bones,
@@ -8,7 +8,9 @@ import {
   propTransformAt,
   transformAt,
 } from "./animation";
-import type { CameraState, CharacterTransform, JointName, Pose, Project } from "./types";
+import type { CameraState, Character, CharacterTransform, JointName, MotionPath, Pose, Project, V } from "./types";
+import { effectParamsAt } from "./effectAnimation";
+import {pathLookup,rawPoint,simplifyFreeDraw,smoothPoints} from "./motionPath";
 
 function resolvedPropTransform(p:Project,propId:string,time:number){
   const tf=propTransformAt(p.propTracks?.[propId],time), out={...tf};
@@ -105,6 +107,7 @@ export function drawScene(
         0.08 * i,
         false,
         transformAt(p.tracks[c.id], Math.max(0, time - i * 0.045)),
+        c,
       );
     const actual = poseAt(p.tracks[c.id], time);
     drawStick(
@@ -114,6 +117,8 @@ export function drawScene(
       preview?.id === c.id ? 0.35 : 1,
       false,
       transformAt(p.tracks[c.id], time),
+      c,
+      poseAt(p.tracks[c.id],Math.max(0,time-.09)),
     );
     if (preview?.id === c.id)
       drawStick(
@@ -123,6 +128,7 @@ export function drawScene(
         0.8,
         false,
         transformAt(p.tracks[c.id], time),
+        c,
       );
   }
   for (const prop of [...(p.props ?? [])]
@@ -136,31 +142,50 @@ export function drawScene(
     if (age < 0 || age > e.duration) continue;
     const q = age / e.duration,
       fade = 1 - q;
+    const animated=effectParamsAt(e,time);
+    if(e.type==="aura"){
+      const attached=e.targetFighter&&p.tracks[e.targetFighter],center=attached?(()=>{const po=poseAt(p.tracks[e.targetFighter!],time),tf=transformAt(p.tracks[e.targetFighter!],time);return applyTransform(po.root,po.root,tf)})():{x:e.x,y:e.y},
+        scale=animated.scale,range=animated.range/100,scatter=animated.scatterRadius,sweep=Math.max(10,animated.arc)*Math.PI/180,count=Math.max(4,Math.round(animated.density)),phase=(time-e.time)*3.2;
+      ctx.save();ctx.translate(center.x,center.y);ctx.globalAlpha=Math.max(.08,animated.opacity/100)*Math.min(1,age/.12)*Math.min(1,(e.duration-age)/.12);ctx.strokeStyle=e.color??"#a7f3ff";ctx.fillStyle=e.secondaryColor??e.color??"#fff";ctx.shadowColor=e.color??"#a7f3ff";ctx.shadowBlur=(e.glow??20)*scale;ctx.lineCap="round";
+      const radius=(72+scatter*.6)*scale*range,style=e.auraStyle??"spike";
+      if(style==="ring"||style==="vortex"){
+        const loops=style==="vortex"?3:1;ctx.lineWidth=Math.max(4,10*scale);
+        for(let j=0;j<loops;j++){ctx.beginPath();ctx.arc(0,-75*scale,radius+j*24*scale,-sweep/2+phase*(j%2?-.35:.45),sweep/2+phase*(j%2?-.35:.45));ctx.stroke()}
+      }else if(style==="flame"||style==="spike"||style==="dragon"){
+        ctx.beginPath();const steps=Math.max(12,count*2);for(let i=0;i<=steps;i++){const a=-sweep/2+i/steps*sweep,r=radius+(i%2?scatter*(.45+.25*Math.sin(phase+i)):0),x=Math.cos(a)*r,y=-75*scale+Math.sin(a)*r*1.35;(i?ctx.lineTo(x,y):ctx.moveTo(x,y))}ctx.strokeStyle=e.color??"#ffb23f";ctx.lineWidth=Math.max(5,9*scale);ctx.stroke();
+      }else{
+        ctx.lineWidth=Math.max(3,6*scale);const base=e.directionX!==undefined?Math.atan2(e.directionY??0,e.directionX):0;
+        for(let i=0;i<count;i++){const a=base-sweep/2+i/Math.max(1,count-1)*sweep,wobble=Math.sin(phase*2+i*2.3)*scatter*.18,start=25*scale+(i%3)*scatter*.15,len=(55+(i%4)*18+scatter+wobble)*scale*range;ctx.beginPath();ctx.moveTo(Math.cos(a)*start,-75*scale+Math.sin(a)*start);ctx.lineTo(Math.cos(a)*len,-75*scale+Math.sin(a)*len);ctx.stroke();if(style==="shards"||style==="lightning"){ctx.beginPath();ctx.arc(Math.cos(a)*len,-75*scale+Math.sin(a)*len,Math.max(2,4*scale),0,Math.PI*2);ctx.fill()}}
+      }
+      ctx.restore();
+    }
     if (e.type === "flash") {
-      ctx.fillStyle = `rgba(255,255,255,${fade * 0.9})`;
+      ctx.fillStyle = `rgba(255,255,255,${fade * 0.9*animated.opacity/100})`;
       ctx.fillRect(-1000, -1000, 3000, 4000);
     }
     if (e.type === "shockwave") {
-      ctx.strokeStyle = `rgba(255,240,180,${fade})`;
-      ctx.lineWidth = 12 * fade;
+      ctx.strokeStyle = `rgba(255,240,180,${fade*animated.opacity/100})`;
+      ctx.lineWidth = 12 * fade*animated.scale;
       ctx.beginPath();
-      ctx.arc(e.x, e.y, 30 + 180 * q, 0, Math.PI * 2);
+      ctx.arc(e.x, e.y, (30 + 180 * q)*animated.scale*(animated.range/100), 0, Math.PI * 2);
       ctx.stroke();
     }
     if (e.type === "lines") {
-      ctx.strokeStyle = `rgba(255,255,255,${fade})`;
-      for (let i = 0; i < 12; i++) {
+      ctx.strokeStyle = `rgba(255,255,255,${fade*animated.opacity/100})`;
+      const lineCount=Math.max(1,Math.round(animated.density)),lineSpread=animated.spread*Math.PI/180;
+      for (let i = 0; i < lineCount; i++) {
+        const angle=-lineSpread/2+i/Math.max(1,lineCount-1)*lineSpread;
         ctx.beginPath();
-        ctx.moveTo(e.x + Math.cos(i) * 40, e.y + Math.sin(i) * 40);
-        ctx.lineTo(e.x + Math.cos(i) * 250, e.y + Math.sin(i) * 250);
+        ctx.moveTo(e.x + Math.cos(angle) * 40, e.y + Math.sin(angle) * 40);
+        ctx.lineTo(e.x + Math.cos(angle) * 250*animated.scale*(animated.range/100), e.y + Math.sin(angle) * 250*animated.scale*(animated.range/100));
         ctx.stroke();
       }
     }
     if (e.type === "dust") {
-      ctx.fillStyle = `rgba(200,190,170,${fade * 0.5})`;
-      for (let i = 0; i < 5; i++) {
+      ctx.fillStyle = `rgba(200,190,170,${fade * 0.5*animated.opacity/100})`;
+      for (let i = 0; i < Math.round(animated.density); i++) {
         ctx.beginPath();
-        ctx.arc(e.x + i * 18 - 36, e.y - q * 50, 20 + q * 20, 0, 7);
+        ctx.arc(e.x + (i-(animated.density-1)/2) * 18*(animated.range/100), e.y - q * 50*(animated.range/100), (20 + q * 20)*animated.scale, 0, 7);
         ctx.fill();
       }
     }
@@ -196,8 +221,28 @@ export function drawScene(
       ctx.restore();
     }
     if(e.type==="motionTrail"&&e.targetFighter){const joint=e.trackedJoint??"rightWrist",samples=Math.max(4,Math.min(24,e.sampleCount??10)),age=e.maximumTrailAge??.35,step=age/samples,times=Array.from({length:samples},(_,i)=>Math.max(0,time-i*step)),blades=e.trackedProp?times.map(t=>bladePointsAt(p,e.trackedProp!,t)):null,pts=blades?.map(x=>x.tip)??times.map(t=>{const po=poseAt(p.tracks[e.targetFighter!],t),tf=transformAt(p.tracks[e.targetFighter!],t);return applyTransform(po[joint],po.root,tf)}),velocity=Math.hypot(pts[0].x-pts[Math.min(2,pts.length-1)].x,pts[0].y-pts[Math.min(2,pts.length-1)].y)/Math.max(.001,step*2),threshold=(e.minimumVelocity??8)*30;if(!e.autoTrail||velocity>threshold){ctx.save();ctx.lineJoin="round";ctx.shadowBlur=(e.glow??18)*e.strength;ctx.shadowColor=e.color??"#fff";for(let i=1;i<pts.length;i++){const alpha=fade*(e.opacity??.9)*(1-i/pts.length)*Math.min(1,velocity/Math.max(1,threshold*2));ctx.globalAlpha=alpha;ctx.fillStyle=e.color??"#fff";if(blades){ctx.beginPath();ctx.moveTo(blades[i-1].base.x,blades[i-1].base.y);ctx.lineTo(blades[i-1].tip.x,blades[i-1].tip.y);ctx.lineTo(blades[i].tip.x,blades[i].tip.y);ctx.lineTo(blades[i].base.x,blades[i].base.y);ctx.closePath();ctx.fill()}else{ctx.strokeStyle=e.color??"#fff";ctx.lineWidth=(e.width??42)*e.strength*(1-i/pts.length);ctx.beginPath();ctx.moveTo(pts[i-1].x,pts[i-1].y);ctx.lineTo(pts[i].x,pts[i].y);ctx.stroke()}}ctx.restore()}}
+    if(e.type==="motionTrail"&&!e.targetFighter){ctx.save();ctx.translate(e.x,e.y);ctx.globalAlpha=fade*animated.opacity/100;ctx.strokeStyle=e.color??"#fff";ctx.shadowColor=e.color??"#fff";ctx.shadowBlur=(e.glow??16)*animated.scale;ctx.lineCap="round";ctx.lineWidth=Math.max(5,(e.width??42)*animated.scale*.35);ctx.beginPath();ctx.arc(0,0,80*(animated.range/100)*animated.scale,-2.35,-2.35+animated.arc*Math.PI/180);ctx.stroke();ctx.restore()}
+    if(e.preset==="ink_crescent_slash"){
+      const root=e.targetFighter?(()=>{const po=poseAt(p.tracks[e.targetFighter!],time),tf=transformAt(p.tracks[e.targetFighter!],time);return applyTransform(po.root,po.root,tf)})():{x:e.x,y:e.y+105},dir=e.directionX&&e.directionX<0?-1:1;
+      ctx.save();ctx.translate(root.x,root.y-105);ctx.scale(dir,1);ctx.globalAlpha=fade*.82;ctx.lineCap="round";
+      ctx.shadowBlur=22*e.strength;ctx.shadowColor=e.secondaryColor??"#111018";ctx.strokeStyle=e.secondaryColor??"#111018";ctx.lineWidth=38*e.strength;ctx.beginPath();ctx.arc(24,0,158,-2.25,1.04);ctx.stroke();
+      ctx.shadowBlur=15*e.strength;ctx.shadowColor=e.color??"#fff";ctx.strokeStyle=e.color??"#fff";ctx.lineWidth=18*e.strength;ctx.beginPath();ctx.arc(24,0,158,-2.25,1.04);ctx.stroke();ctx.restore();
+    }
     if(e.type==="afterimage"&&e.targetFighter){const ch=p.characters.find(c=>c.id===e.targetFighter);if(ch)for(let i=4;i>=1;i--){const po=poseAt(p.tracks[e.targetFighter],Math.max(0,time-i*.06));drawStick(ctx,po,ch.color,fade*.12*(5-i),false)}}
-    if(["sparks","hitParticles","clash"].includes(e.type)){ctx.save();const red=e.type==="hitParticles";ctx.strokeStyle=red?(e.color??`rgba(235,45,65,${fade})`):`rgba(255,225,110,${fade})`;ctx.globalAlpha=fade;ctx.lineWidth=4+e.strength*3;const count=Math.min(18,6+Math.round(e.strength*10));for(let i=0;i<count;i++){const spread=((i/count)-.5)*1.2,len=(35+i%4*13)*e.strength,base=Math.atan2(e.directionY??0,e.directionX??1),angle=base+spread,dx=Math.cos(angle)*len,dy=Math.sin(angle)*len;ctx.beginPath();ctx.moveTo(e.x,e.y);ctx.lineTo(e.x+dx*q,e.y+dy*q);ctx.stroke()}if(e.type==="clash"){ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(e.x,e.y,35*fade,0,7);ctx.fill()}ctx.restore()}
+    if(["sparks","hitParticles","clash"].includes(e.type)){ctx.save();const red=e.type==="hitParticles";ctx.strokeStyle=red?(e.color??`rgba(235,45,65,${fade})`):`rgba(255,225,110,${fade})`;ctx.globalAlpha=fade*animated.opacity/100;ctx.lineWidth=4+animated.scale*3;const count=Math.max(1,Math.round(animated.density)),spreadAmount=animated.spread*Math.PI/180,speed=animated.range/100;for(let i=0;i<count;i++){const spread=((i/count)-.5)*spreadAmount,len=(35+i%4*13)*animated.scale*speed,base=Math.atan2(e.directionY??0,e.directionX??1),angle=base+spread,dx=Math.cos(angle)*len,dy=Math.sin(angle)*len;ctx.beginPath();ctx.moveTo(e.x,e.y);ctx.lineTo(e.x+dx*q,e.y+dy*q);ctx.stroke()}if(e.type==="clash"){ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(e.x,e.y,35*fade*animated.scale,0,7);ctx.fill()}ctx.restore()}
+    if(e.type==="blood"){
+      const count=Math.max(1,Math.round(animated.density)),base=Math.atan2(e.directionY??0,e.directionX??1),spreadAmount=animated.spread*Math.PI/180,speedScale=animated.range/100;
+      ctx.save();ctx.fillStyle=e.color??"#a80f27";ctx.strokeStyle=e.color??"#a80f27";ctx.globalAlpha=Math.min(1,fade*1.4)*animated.opacity/100;ctx.lineCap="round";
+      for(let i=0;i<count;i++){
+        const spread=((i/(Math.max(1,count-1)))-.5)*spreadAmount,angle=base+spread,
+          speed=(46+(i%4)*19)*animated.scale*speedScale,gravity=78*q*q,
+          x=e.x+Math.cos(angle)*speed*q,y=e.y+Math.sin(angle)*speed*q+gravity,
+          radius=Math.max(2,5.5*animated.scale*(1-q*.55)*(i%3===0?1.25:.75));
+        ctx.lineWidth=Math.max(2,radius*.7);ctx.beginPath();ctx.moveTo(e.x+Math.cos(angle)*speed*q*.62,e.y+Math.sin(angle)*speed*q*.62+gravity*.38);ctx.lineTo(x,y);ctx.stroke();
+        ctx.beginPath();ctx.arc(x,y,radius,0,Math.PI*2);ctx.fill();
+      }
+      ctx.restore();
+    }
   }
   ctx.restore();
 }
@@ -216,6 +261,7 @@ function drawProp(
   ctx.fillStyle = color;
   ctx.strokeStyle = "#dcecff";
   ctx.lineWidth = 6;
+  ctx.lineJoin="round";ctx.lineCap="round";
   if (type === "image" && image) {
     const bitmap = new Image();
     bitmap.src = image;
@@ -224,39 +270,84 @@ function drawProp(
       ctx.fillRect(-45, -45, 90, 90);
     }
   } else if (type === "chair") {
-    ctx.fillRect(-55, -30, 110, 25);
-    ctx.fillRect(-50, -120, 20, 100);
-    ctx.fillRect(-50, -5, 14, 85);
-    ctx.fillRect(36, -5, 14, 85);
+    ctx.save();ctx.fillStyle="#8d5b3c";ctx.strokeStyle="#d49a69";ctx.lineWidth=5;ctx.beginPath();ctx.roundRect(-58,-38,116,26,8);ctx.fill();ctx.stroke();ctx.beginPath();ctx.roundRect(-54,-122,22,88,8);ctx.fill();ctx.stroke();ctx.beginPath();ctx.roundRect(-49,-5,13,88,5);ctx.roundRect(36,-5,13,88,5);ctx.fill();ctx.stroke();ctx.restore();
   } else if (type === "table") {
-    ctx.fillRect(-100, -25, 200, 25);
-    ctx.fillRect(-80, 0, 18, 100);
-    ctx.fillRect(62, 0, 18, 100);
+    ctx.save();ctx.fillStyle="#86573a";ctx.strokeStyle="#d39b70";ctx.lineWidth=5;ctx.beginPath();ctx.roundRect(-105,-28,210,25,7);ctx.fill();ctx.stroke();for(const x of [-82,65]){ctx.beginPath();ctx.roundRect(x,0,17,105,5);ctx.fill();ctx.stroke()}ctx.restore();
   } else if (type === "cup") {
-    ctx.fillRect(-22, -35, 44, 55);
-    ctx.beginPath();
-    ctx.arc(25, -10, 18, -Math.PI / 2, Math.PI / 2);
-    ctx.stroke();
-  } else if (["sword", "staff"].includes(type)) {
-    ctx.fillRect(-8, -100, 16, 190);
-    if (type === "sword") ctx.fillRect(-35, 65, 70, 12);
+    ctx.save();ctx.fillStyle="#e8edf3";ctx.strokeStyle="#90a8bb";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(-25,-32);ctx.lineTo(22,-32);ctx.lineTo(17,25);ctx.quadraticCurveTo(0,33,-18,25);ctx.closePath();ctx.fill();ctx.stroke();ctx.beginPath();ctx.ellipse(-2,-32,24,7,0,0,Math.PI*2);ctx.fillStyle="#68402b";ctx.fill();ctx.stroke();ctx.beginPath();ctx.arc(23,-7,19,-Math.PI/2,Math.PI/2);ctx.stroke();ctx.restore();
+  } else if(type==="phone"){
+    ctx.save();ctx.fillStyle="#121a26";ctx.strokeStyle="#7fd3ff";ctx.lineWidth=4;ctx.beginPath();ctx.roundRect(-28,-55,56,110,10);ctx.fill();ctx.stroke();ctx.fillStyle="#1d79aa";ctx.fillRect(-21,-43,42,80);ctx.fillStyle="#d8f4ff";ctx.beginPath();ctx.arc(0,46,4,0,7);ctx.fill();ctx.restore();
+  } else if(type==="book"){
+    ctx.save();ctx.fillStyle="#9d3f4c";ctx.strokeStyle="#f0c9a4";ctx.lineWidth=4;ctx.beginPath();ctx.roundRect(-58,-42,116,84,6);ctx.fill();ctx.stroke();ctx.fillStyle="#f4e6cf";ctx.fillRect(-49,-34,43,68);ctx.fillRect(6,-34,43,68);ctx.strokeStyle="#8f6d58";ctx.beginPath();ctx.moveTo(0,-38);ctx.lineTo(0,38);ctx.stroke();ctx.restore();
+  } else if(type==="flower"){
+    ctx.save();ctx.strokeStyle="#4c9b58";ctx.lineWidth=8;ctx.beginPath();ctx.moveTo(0,70);ctx.quadraticCurveTo(-8,10,0,-32);ctx.stroke();ctx.fillStyle="#4fa861";ctx.beginPath();ctx.ellipse(-13,20,20,9,-.5,0,7);ctx.fill();ctx.fillStyle="#ff6b9d";for(let i=0;i<6;i++){const a=i*Math.PI/3;ctx.beginPath();ctx.ellipse(Math.cos(a)*23,-50+Math.sin(a)*23,17,10,a,0,7);ctx.fill()}ctx.fillStyle="#ffd15b";ctx.beginPath();ctx.arc(0,-50,12,0,7);ctx.fill();ctx.restore();
+  } else if(type==="gift"){
+    ctx.save();ctx.fillStyle="#cf405b";ctx.strokeStyle="#ffd0da";ctx.lineWidth=4;ctx.beginPath();ctx.roundRect(-50,-38,100,88,7);ctx.fill();ctx.stroke();ctx.fillStyle="#f4bf4f";ctx.fillRect(-8,-38,16,88);ctx.fillRect(-55,-45,110,18);ctx.beginPath();ctx.ellipse(-18,-56,24,13,-.5,0,7);ctx.ellipse(18,-56,24,13,.5,0,7);ctx.fill();ctx.restore();
+  } else if (type === "staff") {
+    ctx.save();ctx.strokeStyle="#7f4b2c";ctx.lineWidth=15;ctx.beginPath();ctx.moveTo(-4,105);ctx.quadraticCurveTo(5,5,-4,-108);ctx.stroke();ctx.strokeStyle="#d4a15e";ctx.lineWidth=4;for(const y of [-65,45]){ctx.beginPath();ctx.moveTo(-10,y);ctx.lineTo(8,y+2);ctx.stroke()}ctx.restore();
+  } else if(type==="spear"){
+    ctx.save();ctx.strokeStyle="#7b4b2c";ctx.lineWidth=12;ctx.beginPath();ctx.moveTo(0,112);ctx.lineTo(0,-82);ctx.stroke();ctx.fillStyle="#e7edf3";ctx.strokeStyle="#8796a7";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(0,-135);ctx.lineTo(-18,-82);ctx.lineTo(0,-70);ctx.lineTo(18,-82);ctx.closePath();ctx.fill();ctx.stroke();ctx.fillStyle="#b88a43";ctx.fillRect(-15,-78,30,7);ctx.restore();
+  } else if (type === "sword") {
+    ctx.save();
+    ctx.fillStyle="#29211f";ctx.fillRect(-7,48,14,62);
+    ctx.fillStyle="#d8aa4f";ctx.fillRect(-28,42,56,8);
+    const steel=ctx.createLinearGradient(-8,0,10,0);steel.addColorStop(0,"#8795a6");steel.addColorStop(.45,"#f5f8fb");steel.addColorStop(1,"#aab7c6");
+    ctx.fillStyle=steel;ctx.strokeStyle="#eaf2fb";ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(-6,42);ctx.quadraticCurveTo(-12,-40,-3,-118);ctx.quadraticCurveTo(7,-112,10,-101);ctx.lineTo(7,42);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.restore();
+  } else if (type === "knife") {
+    ctx.save();
+    ctx.fillStyle="#302522";ctx.fillRect(-8,18,16,58);
+    ctx.fillStyle="#c99b43";ctx.fillRect(-22,12,44,8);
+    const steel=ctx.createLinearGradient(-10,0,10,0);steel.addColorStop(0,"#8190a2");steel.addColorStop(.5,"#f4f7fb");steel.addColorStop(1,"#a8b4c2");
+    ctx.fillStyle=steel;ctx.strokeStyle="#eaf2fb";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(-8,12);ctx.lineTo(-5,-62);ctx.lineTo(10,-46);ctx.lineTo(8,12);ctx.closePath();ctx.fill();ctx.stroke();ctx.restore();
+  } else if(type==="gun"){
+    ctx.save();ctx.fillStyle="#26313d";ctx.strokeStyle="#9aabba";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(-70,-28);ctx.lineTo(52,-28);ctx.quadraticCurveTo(72,-24,72,-8);ctx.lineTo(25,4);ctx.lineTo(18,20);ctx.lineTo(-5,20);ctx.lineTo(-16,70);ctx.lineTo(-48,70);ctx.lineTo(-37,12);ctx.lineTo(-70,5);ctx.closePath();ctx.fill();ctx.stroke();ctx.fillStyle="#151c24";ctx.fillRect(-67,-21,106,12);ctx.beginPath();ctx.arc(-4,18,17,0,Math.PI);ctx.stroke();ctx.restore();
   } else if (type === "shield") {
-    ctx.beginPath();
-    ctx.arc(0, 0, 55, 0, 7);
-    ctx.fill();
-    ctx.stroke();
+    ctx.save();ctx.fillStyle=color;ctx.strokeStyle="#d7e5f2";ctx.lineWidth=6;ctx.beginPath();ctx.moveTo(0,-68);ctx.quadraticCurveTo(58,-57,58,-8);ctx.quadraticCurveTo(48,52,0,78);ctx.quadraticCurveTo(-48,52,-58,-8);ctx.quadraticCurveTo(-58,-57,0,-68);ctx.closePath();ctx.fill();ctx.stroke();ctx.strokeStyle="#e1b64f";ctx.lineWidth=7;ctx.beginPath();ctx.moveTo(0,-55);ctx.lineTo(0,59);ctx.moveTo(-42,-5);ctx.lineTo(42,-5);ctx.stroke();ctx.restore();
   } else if (type === "ball" || type === "circle") {
     ctx.beginPath();
     ctx.arc(0, 0, 45, 0, 7);
     ctx.fill();
-    ctx.stroke();
+    ctx.stroke();if(type==="ball"){ctx.lineWidth=3;ctx.beginPath();ctx.arc(0,0,28,0,7);ctx.moveTo(-43,-10);ctx.quadraticCurveTo(0,12,43,-10);ctx.moveTo(-8,-44);ctx.quadraticCurveTo(12,0,-8,44);ctx.stroke()}
+  } else if(type==="sofa"||type==="bench"){
+    ctx.save();ctx.fillStyle=type==="sofa"?"#516f91":"#86583b";ctx.strokeStyle=type==="sofa"?"#9fc4e8":"#d3a176";ctx.lineWidth=5;ctx.beginPath();ctx.roundRect(-105,-50,210,76,16);ctx.fill();ctx.stroke();ctx.beginPath();ctx.roundRect(-118,5,236,48,12);ctx.fill();ctx.stroke();ctx.fillRect(-95,50,18,35);ctx.fillRect(77,50,18,35);ctx.restore();
+  } else if(type==="bed"){
+    ctx.save();ctx.fillStyle="#d9e1ea";ctx.strokeStyle="#8aa1b8";ctx.lineWidth=5;ctx.beginPath();ctx.roundRect(-115,-25,230,65,12);ctx.fill();ctx.stroke();ctx.fillStyle="#819bc0";ctx.beginPath();ctx.roundRect(-112,-50,72,34,12);ctx.fill();ctx.fillStyle="#70533f";ctx.fillRect(-120,-57,12,132);ctx.fillRect(108,25,12,50);ctx.restore();
+  } else if(type==="bag"){
+    ctx.save();ctx.fillStyle="#805739";ctx.strokeStyle="#d0a477";ctx.lineWidth=5;ctx.beginPath();ctx.roundRect(-50,-35,100,90,12);ctx.fill();ctx.stroke();ctx.beginPath();ctx.arc(0,-34,30,Math.PI,0);ctx.stroke();ctx.restore();
+  } else if(type==="umbrella"){
+    ctx.save();ctx.fillStyle="#4e9ed0";ctx.strokeStyle="#bde8ff";ctx.lineWidth=5;ctx.beginPath();ctx.arc(0,-25,72,Math.PI,Math.PI*2);ctx.lineTo(-72,-25);ctx.closePath();ctx.fill();ctx.stroke();ctx.strokeStyle="#6d7680";ctx.beginPath();ctx.moveTo(0,-25);ctx.lineTo(0,80);ctx.quadraticCurveTo(0,105,22,92);ctx.stroke();ctx.restore();
+  } else if(type==="letter"){
+    ctx.save();ctx.fillStyle="#f0e3c9";ctx.strokeStyle="#9d8262";ctx.lineWidth=4;ctx.fillRect(-65,-42,130,84);ctx.strokeRect(-65,-42,130,84);ctx.beginPath();ctx.moveTo(-62,-39);ctx.lineTo(0,5);ctx.lineTo(62,-39);ctx.stroke();ctx.restore();
+  } else if(type==="flashlight"){
+    ctx.save();ctx.fillStyle="#34414f";ctx.strokeStyle="#a9bdce";ctx.lineWidth=4;ctx.beginPath();ctx.roundRect(-18,-72,36,105,8);ctx.fill();ctx.stroke();ctx.beginPath();ctx.moveTo(-18,-72);ctx.lineTo(-35,-100);ctx.lineTo(35,-100);ctx.lineTo(18,-72);ctx.closePath();ctx.fill();ctx.stroke();ctx.fillStyle="#fff0a8";ctx.fillRect(-28,-96,56,8);ctx.restore();
+  } else if(type==="radio"){
+    ctx.save();ctx.fillStyle="#394958";ctx.strokeStyle="#a9bfce";ctx.lineWidth=4;ctx.beginPath();ctx.roundRect(-67,-45,134,90,9);ctx.fill();ctx.stroke();ctx.beginPath();ctx.arc(-28,4,27,0,7);ctx.stroke();ctx.fillStyle="#93a9ba";ctx.fillRect(13,-25,39,9);ctx.fillRect(13,-8,39,6);ctx.beginPath();ctx.moveTo(42,-45);ctx.lineTo(57,-95);ctx.stroke();ctx.restore();
+  } else if(type==="line"){
+    ctx.strokeStyle=color;ctx.lineWidth=10;ctx.beginPath();ctx.moveTo(0,-75);ctx.lineTo(0,75);ctx.stroke();
   } else {
     ctx.fillRect(-45, -45, 90, 90);
     ctx.strokeRect(-45, -45, 90, 90);
   }
   ctx.restore();
 }
-function drawStick(
+const propHitSize=(type:string)=>({sword:{x:38,y:125},knife:{x:34,y:82},staff:{x:26,y:115},spear:{x:32,y:145},gun:{x:82,y:82},table:{x:115,y:110},chair:{x:70,y:130},sofa:{x:125,y:90},bed:{x:130,y:85},bench:{x:125,y:90},umbrella:{x:85,y:115},radio:{x:78,y:105}}[type]??{x:75,y:75});
+export function drawCharacterPreview(ctx:CanvasRenderingContext2D,character:Character,time:number,w:number,h:number){
+  ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,w,h);const g=ctx.createLinearGradient(0,0,0,h);g.addColorStop(0,"#17233c");g.addColorStop(1,"#080d18");ctx.fillStyle=g;ctx.fillRect(0,0,w,h);
+  ctx.strokeStyle="#31425d";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(50,h*.82);ctx.lineTo(w-50,h*.82);ctx.stroke();
+  const pose=basePose(w/2,h*.59,false),previous=basePose(w/2,h*.59,false),phase=time*Math.PI*2/2.4,shift=Math.sin(phase)*8;
+  pose.torso.x+=shift*.55;pose.neck.x+=shift*.7;pose.head.x+=shift;pose.leftWrist.y+=Math.sin(phase+.8)*8;pose.rightWrist.y+=Math.sin(phase+2.5)*7;pose.leftKnee.x-=shift*.18;pose.rightHip.x+=shift*.12;
+  previous.root.x-=Math.cos(phase)*3;previous.root.y-=Math.sin(phase)*2;
+  const scale=character.preset==="large"?1.24:character.preset==="child"?.7:character.preset==="small"?.82:character.preset==="female"?.96:character.preset==="male"?1.04:1,
+    transform={rotation:0,scaleX:scale,scaleY:scale,flipH:false,flipV:false};
+  drawStick(ctx,pose,character.color,1,false,transform,character,previous);
+  if(character.equipment&&character.equipment!=="none"){
+    const wrist=pose.rightWrist,elbow=pose.rightElbow,rotation=Math.atan2(wrist.y-elbow.y,wrist.x-elbow.x)*180/Math.PI+90;
+    drawProp(ctx,character.equipment,character.appearance?.accentColor??"#dcecff",{x:wrist.x,y:wrist.y,rotation,scaleX:.72,scaleY:.72,flipH:false,opacity:1,attachment:null});
+  }
+}
+export function drawStick(
   ctx: CanvasRenderingContext2D,
   p: Pose,
   color: string,
@@ -269,6 +360,8 @@ function drawStick(
     flipH: false,
     flipV: false,
   },
+  character?:Character,
+  previousPose?:Pose,
 ) {
   ctx.save();
   ctx.translate(p.root.x, p.root.y);
@@ -283,16 +376,74 @@ function drawStick(
   ctx.fillStyle = color;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.lineWidth = 16;
-  bones.forEach(([a, b]) => {
-    ctx.beginPath();
-    ctx.moveTo(p[a].x, p[a].y);
-    ctx.lineTo(p[b].x, p[b].y);
-    ctx.stroke();
+  const profile=character?.preset??"standard";
+  const visual={
+    standard:{limb:31,joint:15.5,head:40,shoulder:9,waist:9,hip:7},
+    male:{limb:34,joint:17,head:41,shoulder:15,waist:11,hip:8},
+    female:{limb:28,joint:14,head:39,shoulder:6,waist:7,hip:10},
+    child:{limb:26,joint:13,head:44,shoulder:5,waist:7,hip:8},
+    large:{limb:41,joint:20.5,head:47,shoulder:19,waist:17,hip:14},
+    small:{limb:25,joint:12.5,head:36,shoulder:5,waist:6,hip:7},
+  }[profile]??{limb:31,joint:15.5,head:40,shoulder:9,waist:9,hip:7};
+  const thickness=visual.limb,headRadius=visual.head;
+  const segment=(a:JointName,b:JointName,width=thickness)=>{
+    ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(p[a].x,p[a].y);ctx.lineTo(p[b].x,p[b].y);ctx.stroke();
+  };
+  const segmentPoints=(a:{x:number;y:number},b:{x:number;y:number},width=thickness)=>{
+    ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+  };
+  const joint=(name:JointName,r=visual.joint)=>{ctx.beginPath();ctx.arc(p[name].x,p[name].y,r,0,Math.PI*2);ctx.fill()};
+
+  // Limbs remain driven by the original bones, but are rendered as overlapping
+  // rounded capsules. The overlap removes the mechanical gaps that otherwise
+  // appear at elbows, knees, shoulders, and hips in extreme poses.
+  // Visually merge the two thigh roots into the pelvis axis. The editable hip
+  // handles stay independent, while the silhouette no longer grows side bumps.
+  const visualHip=(side:"left"|"right")=>({
+    x:p.root.x+(p[`${side}Hip`].x-p.root.x)*.28,
+    y:p.root.y+(p[`${side}Hip`].y-p.root.y)*.28,
   });
-  ctx.beginPath();
-  ctx.arc(p.head.x, p.head.y, 38, 0, Math.PI * 2);
-  ctx.stroke();
+  segmentPoints(visualHip("left"),p.leftKnee);
+  segmentPoints(visualHip("right"),p.rightKnee);
+  segment("leftKnee","leftAnkle");
+  segment("rightKnee","rightAnkle");
+  segment("leftAnkle","leftToe",thickness*.76);
+  segment("rightAnkle","rightToe",thickness*.76);
+  ([
+    ["neck","leftShoulder"],["neck","rightShoulder"],
+    ["leftShoulder","leftElbow"],["leftElbow","leftWrist"],
+    ["rightShoulder","rightElbow"],["rightElbow","rightWrist"],
+  ] as [JointName,JointName][]).forEach(([a,b])=>segment(a,b));
+  (["leftKnee","rightKnee","leftElbow","rightElbow","leftAnkle","rightAnkle","leftWrist","rightWrist"] as JointName[]).forEach((name)=>joint(name));
+  joint("leftToe",visual.joint*.76);joint("rightToe",visual.joint*.76);
+
+  // The body uses the same rounded-capsule language as every limb. Unlike a
+  // polygon derived from shoulder/hip distance, it cannot balloon or fold
+  // over itself in wide or crouched poses.
+  const ls=p.leftShoulder,rs=p.rightShoulder;
+  segment("root","torso");
+  segment("torso","neck");
+  joint("root");joint("torso");joint("neck");
+  (["leftShoulder","rightShoulder"] as JointName[]).forEach((name)=>joint(name));
+
+  // The neck and filled head sit above the body silhouette; accessories are
+  // layered afterward using the same joint anchors.
+  segment("neck","head",thickness);
+  ctx.beginPath();ctx.arc(p.head.x,p.head.y,headRadius,0,Math.PI*2);ctx.fill();
+  if(character?.appearance){
+    const a=character.appearance,accent=a.accentColor||color,head=p.head,neck=p.neck,ls=p.leftShoulder,rs=p.rightShoulder,
+      vx=previousPose?p.root.x-previousPose.root.x:0,vy=previousPose?p.root.y-previousPose.root.y:0,
+      trailX=Math.max(-42,Math.min(42,-vx*1.8)),trailY=Math.max(-22,Math.min(28,-vy*1.2));
+    ctx.save();ctx.strokeStyle=accent;ctx.fillStyle=accent;ctx.lineWidth=Math.max(7,thickness*.55);ctx.lineCap="round";ctx.lineJoin="round";
+    if(a.head==="headband"){ctx.beginPath();ctx.moveTo(head.x-headRadius,head.y-8);ctx.lineTo(head.x+headRadius,head.y-8);ctx.stroke();ctx.beginPath();ctx.moveTo(head.x-headRadius,head.y-8);ctx.lineTo(head.x-headRadius-28+trailX*.3,head.y+8+trailY*.2);ctx.stroke()}
+    if(a.head==="hat"){ctx.fillRect(head.x-headRadius-8,head.y-headRadius-13,headRadius*2+16,10);ctx.beginPath();ctx.arc(head.x,head.y-headRadius-12,headRadius*.72,Math.PI,Math.PI*2);ctx.fill()}
+    if(a.head==="hood"){ctx.globalAlpha=.72;ctx.beginPath();ctx.arc(head.x,head.y,headRadius+13,Math.PI*.72,Math.PI*2.28);ctx.stroke()}
+    if(a.face==="mask"||a.face==="ninja-mask"){ctx.globalAlpha=.78;ctx.beginPath();ctx.arc(head.x,head.y+(a.face==="ninja-mask"?12:3),headRadius*.72,0,Math.PI);ctx.fill()}
+    if(a.face==="glasses"){ctx.globalAlpha=1;ctx.lineWidth=6;ctx.beginPath();ctx.arc(head.x-15,head.y-3,13,0,7);ctx.arc(head.x+15,head.y-3,13,0,7);ctx.moveTo(head.x-2,head.y-3);ctx.lineTo(head.x+2,head.y-3);ctx.stroke()}
+    if(a.body==="scarf"){ctx.globalAlpha=.88;ctx.lineWidth=12;ctx.beginPath();ctx.moveTo(neck.x-12,neck.y+9);ctx.lineTo(neck.x+15,neck.y+9);ctx.stroke();ctx.beginPath();ctx.moveTo(neck.x-4,neck.y+12);ctx.quadraticCurveTo(neck.x-28+trailX*.45,neck.y+34,neck.x-52+trailX,neck.y+46+trailY);ctx.stroke()}
+    if(a.body==="cape"){ctx.globalAlpha=.45;const shoulder={x:(ls.x+rs.x)/2,y:(ls.y+rs.y)/2};ctx.beginPath();ctx.moveTo(ls.x,ls.y);ctx.lineTo(rs.x,rs.y);ctx.lineTo(shoulder.x+45+trailX,shoulder.y+128+trailY);ctx.lineTo(shoulder.x-34+trailX*.55,shoulder.y+118+trailY);ctx.closePath();ctx.fill();ctx.globalAlpha=.9;ctx.stroke()}
+    ctx.restore();
+  }
   if (handles) {
     ctx.fillStyle = "#fff";
     joints
@@ -320,6 +471,8 @@ function drawStick(
 export type TransformMode = "move" | "rotate" | "scale" | "pose" | "camera";
 type Drag = {
   char: string;
+  effectId?: string;
+  effectPosition?: { x: number; y: number };
   propId?: string;
   propTransform?: import("./types").PropTransform;
   mode: TransformMode;
@@ -331,7 +484,43 @@ type Drag = {
   startDistance?: number;
   camera?: CameraState;
   cameraAction?: "pan" | "zoom" | "rotate";
+  startClient?: { x: number; y: number };
+  moved?: boolean;
+  pathAction?:"anchor"|"in"|"out"|"move"|"draw";
+  pathPoint?:number;
+  pathStart?:MotionPath;
+  freeDraw?:V[];
 };
+type JointHit = { char: string; joint: JointName; pose: Pose; transform: CharacterTransform; distance: number };
+const rigChildren:Partial<Record<JointName,JointName[]>>={
+  root:["torso","leftHip","rightHip"],torso:["neck"],neck:["head","leftShoulder","rightShoulder"],
+  leftShoulder:["leftElbow"],leftElbow:["leftWrist"],rightShoulder:["rightElbow"],rightElbow:["rightWrist"],
+  leftHip:["leftKnee"],leftKnee:["leftAnkle"],leftAnkle:["leftToe"],rightHip:["rightKnee"],rightKnee:["rightAnkle"],rightAnkle:["rightToe"],
+};
+const rigParent:Partial<Record<JointName,JointName>>={};
+Object.entries(rigChildren).forEach(([parent,children])=>children?.forEach(child=>rigParent[child]=parent as JointName));
+const descendants=(joint:JointName)=>{const out:JointName[]=[];const visit=(name:JointName)=>{for(const child of rigChildren[name]??[]){out.push(child);visit(child)}};visit(joint);return out};
+/** Stick Nodes style joint editing: bone lengths stay stable and descendants follow their parent. */
+export function editRigJoint(source:Pose,joint:JointName,target:{x:number;y:number}):Pose{
+  const pose=structuredClone(source),old=source[joint];
+  if(joint==="root"){
+    const requested={x:target.x-old.x,y:target.y-old.y},legFits=(amount:number)=>["left","right"].every(side=>{const hip=source[`${side}Hip` as JointName],knee=source[`${side}Knee` as JointName],ankle=source[`${side}Ankle` as JointName],upper=Math.hypot(knee.x-hip.x,knee.y-hip.y),lower=Math.hypot(ankle.x-knee.x,ankle.y-knee.y),distance=Math.hypot(hip.x+requested.x*amount-ankle.x,hip.y+requested.y*amount-ankle.y);return distance<=upper+lower-.5&&distance>=Math.abs(upper-lower)+.5});
+    // Keep both feet planted and both leg segment lengths invariant. If the
+    // requested pelvis position is unreachable, stop at the reach boundary.
+    let amount=1;
+    if(!legFits(1)){let low=0,high=1;for(let i=0;i<28;i++){const mid=(low+high)/2;if(legFits(mid))low=mid;else high=mid}amount=low}
+    const dx=requested.x*amount,dy=requested.y*amount;
+    const solveKnee=(hip:JointName,knee:JointName,ankle:JointName)=>{const h=pose[hip],a=source[ankle],preferred=source[knee],upper=Math.hypot(source[knee].x-source[hip].x,source[knee].y-source[hip].y),lower=Math.hypot(source[ankle].x-source[knee].x,source[ankle].y-source[knee].y),vx=a.x-h.x,vy=a.y-h.y,d=Math.max(1,Math.hypot(vx,vy)),along=(d*d+upper*upper-lower*lower)/(2*d),height=Math.sqrt(Math.max(0,upper*upper-along*along)),ux=vx/d,uy=vy/d,base={x:h.x+ux*along,y:h.y+uy*along},p1={x:base.x-uy*height,y:base.y+ux*height},p2={x:base.x+uy*height,y:base.y-ux*height};pose[knee]=Math.hypot(p1.x-preferred.x,p1.y-preferred.y)<=Math.hypot(p2.x-preferred.x,p2.y-preferred.y)?p1:p2};
+    for(const name of ["root","torso","neck","head","leftShoulder","leftElbow","leftWrist","rightShoulder","rightElbow","rightWrist","leftHip","rightHip"] as JointName[]){pose[name].x+=dx;pose[name].y+=dy}
+    solveKnee("leftHip","leftKnee","leftAnkle");solveKnee("rightHip","rightKnee","rightAnkle");
+    return pose;
+  }
+  const parent=rigParent[joint];let next=target;
+  if(parent){const anchor=source[parent],length=Math.max(1,Math.hypot(old.x-anchor.x,old.y-anchor.y)),dx=target.x-anchor.x,dy=target.y-anchor.y,distance=Math.max(1,Math.hypot(dx,dy));next={x:anchor.x+dx/distance*length,y:anchor.y+dy/distance*length}}
+  const dx=next.x-old.x,dy=next.y-old.y;pose[joint]=next;
+  for(const name of descendants(joint)){pose[name].x+=dx;pose[name].y+=dy}
+  return pose;
+}
 const applyTransform = (
   q: { x: number; y: number },
   root: { x: number; y: number },
@@ -376,13 +565,16 @@ export function CanvasView({
   time,
   selected,
   selectedProp,
+  selectedEffect,
   mode,
   groundLock,
   onSelect,
   onSelectProp,
+  onSelectEffect,
   onPoseChange,
   onTransformChange,
   onPropTransformChange,
+  onEffectChange,
   onGestureStart,
   onGestureEnd,
   onCameraChange,
@@ -391,21 +583,29 @@ export function CanvasView({
   previewCamera = false,
   safeArea = false,
   reviewJoints = [],
+  workspaceZoom = 1,
+  activePath = null,
+  onPathChange,
+  pathEditing = false,
+  guidePaths = [],
 }: {
   project: Project;
   time: number;
   selected: string;
   selectedProp: string | null;
+  selectedEffect: string | null;
   mode: TransformMode;
   groundLock: boolean;
   onSelect: (v: string, additive?: boolean) => void;
   onSelectProp: (v: string | null) => void;
+  onSelectEffect: (v: string | null) => void;
   onPoseChange: (id: string, p: Pose) => void;
   onTransformChange: (id: string, t: CharacterTransform) => void;
   onPropTransformChange: (
     id: string,
     t: import("./types").PropTransform,
   ) => void;
+  onEffectChange: (id: string, values: { x: number; y: number }) => void;
   onGestureStart: () => void;
   onGestureEnd: () => void;
   onCameraChange: (camera: CameraState) => void;
@@ -414,20 +614,40 @@ export function CanvasView({
   previewCamera?: boolean;
   safeArea?: boolean;
   reviewJoints?: JointName[];
+  /** Editor-only magnification; never changes actor or output data. */
+  workspaceZoom?: number;
+  activePath?:MotionPath|null;
+  onPathChange?:(path:MotionPath)=>void;
+  pathEditing?:boolean;
+  guidePaths?:MotionPath[];
 }) {
   const ref = useRef<HTMLCanvasElement>(null),
-    drag = useRef<Drag | null>(null);
+    drag = useRef<Drag | null>(null),
+    gestureView = useRef<{x:number;y:number;zoom:number;rotation:number;width:number;height:number}|null>(null),
+    [hoverJoint,setHoverJoint]=useState<{char:string;joint:JointName}|null>(null);
   const editorView = () => {
+    if(gestureView.current)return gestureView.current;
     const format = project.format ?? { width: 1080, height: 1920 },
       width = 1200,
       height = 800,
       zoom = Math.min(
         (width / format.width) * 0.82,
         (height / format.height) * 0.82,
-      );
+      ) * workspaceZoom;
+    const selectedPose = project.tracks[selected]?.length ? poseAt(project.tracks[selected], time) : null,
+      focusAmount = Math.max(0, Math.min(1, (workspaceZoom - 1) / 0.5)),
+      center = { x: format.width / 2, y: format.height / 2 },
+      focus = selectedPose?.root ?? center;
     // The world editor must remain stationary while the output camera moves.
     // Following output pan/zoom here creates a feedback loop under the pointer.
-    return { x: format.width / 2, y: format.height / 2, zoom, rotation: 0, width, height };
+    return {
+      x: center.x + (focus.x - center.x) * focusAmount,
+      y: center.y + (focus.y - center.y) * focusAmount,
+      zoom,
+      rotation: 0,
+      width,
+      height,
+    };
   };
   useEffect(() => {
     const c = ref.current!,
@@ -514,15 +734,40 @@ export function CanvasView({
     ctx.rotate((-cam.rotation * Math.PI) / 180);
     ctx.scale(cam.zoom, cam.zoom);
     ctx.translate(-cam.x, -cam.y);
+    for(const guide of guidePaths.filter(path=>path.id!==activePath?.id)){const table=pathLookup(guide);ctx.save();ctx.strokeStyle="rgba(79,224,193,.22)";ctx.lineWidth=2/cam.zoom;ctx.beginPath();table.forEach((item,index)=>index?ctx.lineTo(item.point.x,item.point.y):ctx.moveTo(item.point.x,item.point.y));ctx.stroke();ctx.restore()}
+    if(activePath?.points.length){
+      const table=pathLookup(activePath);ctx.save();ctx.strokeStyle="#4fe0c1";ctx.lineWidth=3/cam.zoom;ctx.setLineDash([10/cam.zoom,7/cam.zoom]);ctx.beginPath();table.forEach((item,index)=>index?ctx.lineTo(item.point.x,item.point.y):ctx.moveTo(item.point.x,item.point.y));ctx.stroke();ctx.setLineDash([]);
+      activePath.points.forEach((anchor,index)=>{if((activePath.pathType==="bezier"||activePath.pathType==="free-draw")){ctx.strokeStyle="rgba(130,205,255,.7)";ctx.lineWidth=1.5/cam.zoom;for(const key of ["in","out"] as const){const handle=anchor[key];if(!handle)continue;ctx.beginPath();ctx.moveTo(anchor.x,anchor.y);ctx.lineTo(handle.x,handle.y);ctx.stroke();ctx.fillStyle="#10283a";ctx.strokeStyle="#8edcff";ctx.beginPath();ctx.arc(handle.x,handle.y,6/cam.zoom,0,Math.PI*2);ctx.fill();ctx.stroke()}}ctx.fillStyle=index===0?"#75f2ad":index===activePath.points.length-1?"#ffbd69":"#0d2635";ctx.strokeStyle="#e6ffff";ctx.lineWidth=2/cam.zoom;ctx.beginPath();ctx.arc(anchor.x,anchor.y,8/cam.zoom,0,Math.PI*2);ctx.fill();ctx.stroke()});ctx.restore();
+    }
+    if (selectedEffect) {
+      const effect = project.effects.find((item) => item.id === selectedEffect);
+      if (effect) {
+        const radius = Math.max(42, 70 * Math.max(.25, effect.strength || 1));
+        ctx.strokeStyle = "#ff5d86";
+        ctx.lineWidth = 2 / cam.zoom;
+        ctx.setLineDash([8 / cam.zoom, 7 / cam.zoom]);
+        ctx.beginPath();
+        ctx.arc(effect.x, effect.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#ff5d86";
+        ctx.beginPath();
+        ctx.arc(effect.x, effect.y, 7 / cam.zoom, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
     if (selectedProp) {
       const tf = propTransformAt(project.propTracks?.[selectedProp], time);
+      const prop=project.props?.find(item=>item.id===selectedProp),size=propHitSize(prop?.type??"rectangle");
       ctx.translate(tf.x, tf.y);
       ctx.rotate((tf.rotation * Math.PI) / 180);
       ctx.scale(tf.scaleX, tf.scaleY);
       ctx.strokeStyle = "#67d4ff";
       ctx.lineWidth = 2 / cam.zoom;
       ctx.setLineDash([8, 7]);
-      ctx.strokeRect(-65, -65, 130, 130);
+      ctx.strokeRect(-size.x, -size.y, size.x*2, size.y*2);
       ctx.setLineDash([]);
       ctx.restore();
       return;
@@ -553,6 +798,12 @@ export function CanvasView({
     ctx.setLineDash([8, 7]);
     ctx.strokeRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
     ctx.setLineDash([]);
+    if(mode==="pose"){
+      ctx.save();ctx.lineWidth=3/cam.zoom;ctx.strokeStyle="rgba(90,215,255,.78)";
+      for(const [a,boneEnd] of bones){const aa=applyTransform(pose[a],pose.root,tf),bb=applyTransform(pose[boneEnd],pose.root,tf);ctx.beginPath();ctx.moveTo(aa.x,aa.y);ctx.lineTo(bb.x,bb.y);ctx.stroke()}
+      for(const name of joints){const point=applyTransform(pose[name],pose.root,tf),root=name==="root",hot=hoverJoint?.char===selected&&hoverJoint.joint===name;ctx.fillStyle=root?"#ffb84d":"#102235";ctx.strokeStyle=hot?"#e9fbff":root?"#ffe1a8":"#67d4ff";ctx.lineWidth=(hot?5:3)/cam.zoom;if(root){const s=(hot?11:9)/cam.zoom;ctx.save();ctx.translate(point.x,point.y);ctx.rotate(Math.PI/4);ctx.fillRect(-s,-s,s*2,s*2);ctx.strokeRect(-s,-s,s*2,s*2);ctx.restore()}else{ctx.beginPath();ctx.arc(point.x,point.y,(hot?11:8)/cam.zoom,0,Math.PI*2);ctx.fill();ctx.stroke();if(hot){ctx.beginPath();ctx.arc(point.x,point.y,15/cam.zoom,0,Math.PI*2);ctx.stroke()}}}
+      ctx.restore();
+    }
     ctx.fillStyle = "#07111f";
     ctx.strokeStyle = "#67d4ff";
     [
@@ -586,8 +837,8 @@ export function CanvasView({
       ctx.strokeStyle="#ffbf5b";ctx.lineWidth=4/cam.zoom;ctx.setLineDash([5/cam.zoom,4/cam.zoom]);
       const rp=poseAt(project.tracks[selected],time),rt=transformAt(project.tracks[selected],time);for(const j of reviewJoints){const q=applyTransform(rp[j],rp.root,rt);ctx.beginPath();ctx.arc(q.x,q.y,22/cam.zoom,0,Math.PI*2);ctx.stroke();}ctx.restore();
     }
-  }, [project, time, selected, selectedProp, preview, mode, previewCamera, safeArea, reviewJoints]);
-  const point = (e: React.PointerEvent) => {
+  }, [project, time, selected, selectedProp, selectedEffect, preview, mode, previewCamera, safeArea, reviewJoints, workspaceZoom, hoverJoint, activePath, guidePaths]);
+  const point = (e: React.PointerEvent | React.MouseEvent) => {
     const format = project.format ?? { width: 1080, height: 1920 },
       view = editorView(),
       r = ref.current!.getBoundingClientRect(),
@@ -603,8 +854,39 @@ export function CanvasView({
       sn = Math.sin(angle);
     return { x: cam.x + dx * cs - dy * sn, y: cam.y + dx * sn + dy * cs };
   };
+  const nearestJoint = (e: React.PointerEvent): JointHit | null => {
+    if(mode!=="pose"||previewCamera)return null;
+    const q=point(e),view=editorView(),rect=ref.current!.getBoundingClientRect(),screenScale=view.zoom*rect.width/view.width,hitRadius=16;
+    let best:JointHit|null=null;
+    // Rendering order is deterministic. Later characters/joints win only when
+    // distances are effectively equal, matching the front-most painted marker.
+    const selectedCharacter=project.characters.find(character=>character.id===selected&&character.visible&&!character.locked),candidates=selectedCharacter?[selectedCharacter]:project.characters;
+    for(const character of candidates){
+      if(!character.visible||character.locked)continue;
+      const pose=poseAt(project.tracks[character.id],time),transform=transformAt(project.tracks[character.id],time);
+      for(const joint of joints){
+        const world=applyTransform(pose[joint],pose.root,transform),distance=Math.hypot(world.x-q.x,world.y-q.y)*screenScale;
+        if(distance<=hitRadius&&(!best||distance<best.distance-.75||Math.abs(distance-best.distance)<=.75))best={char:character.id,joint,pose,transform,distance};
+      }
+    }
+    return best;
+  };
   const down = (e: React.PointerEvent) => {
+    gestureView.current=editorView();
     const q = point(e);
+    if(pathEditing&&activePath&&onPathChange&&!previewCamera){
+      const view=editorView(),rect=ref.current!.getBoundingClientRect(),scale=view.zoom*rect.width/view.width,hit=16/scale;
+      for(let i=activePath.points.length-1;i>=0;i--){const anchor=activePath.points[i];for(const action of ["out","in","anchor"] as const){const target=action==="anchor"?anchor:anchor[action];if(target&&Math.hypot(q.x-target.x,q.y-target.y)<=hit){drag.current={char:"",mode,pose:basePose(q.x,q.y),transform:{rotation:0,scaleX:1,scaleY:1,flipH:false,flipV:false},start:q,pathAction:action,pathPoint:i,pathStart:structuredClone(activePath)};onGestureStart();ref.current!.setPointerCapture(e.pointerId);return}}}
+      const table=pathLookup(activePath),near=table.some(item=>Math.hypot(q.x-item.point.x,q.y-item.point.y)<=12/scale);if(near){drag.current={char:"",mode,pose:basePose(q.x,q.y),transform:{rotation:0,scaleX:1,scaleY:1,flipH:false,flipV:false},start:q,pathAction:"move",pathStart:structuredClone(activePath)};onGestureStart();ref.current!.setPointerCapture(e.pointerId);return}
+      if(activePath.pathType==="free-draw"){drag.current={char:"",mode,pose:basePose(q.x,q.y),transform:{rotation:0,scaleX:1,scaleY:1,flipH:false,flipV:false},start:q,pathAction:"draw",pathStart:structuredClone(activePath),freeDraw:[q]};onGestureStart();ref.current!.setPointerCapture(e.pointerId);return}
+    }
+    const jointHit=nearestJoint(e);
+    if(jointHit){
+      e.preventDefault();e.stopPropagation();
+      onSelectEffect(null);onSelectProp(null);onSelect(jointHit.char,e.shiftKey);setHoverJoint({char:jointHit.char,joint:jointHit.joint});
+      drag.current={char:jointHit.char,mode:"pose",pose:jointHit.pose,transform:jointHit.transform,start:q,joint:jointHit.joint,startClient:{x:e.clientX,y:e.clientY},moved:false};
+      onGestureStart();ref.current!.setPointerCapture(e.pointerId);return;
+    }
     if (mode === "camera" && !previewCamera) {
       const format = project.format ?? { width: 1080, height: 1920 },
         camera = cameraAt(project.camera, time),
@@ -636,13 +918,35 @@ export function CanvasView({
         return;
       }
     }
+    for (const effect of [...project.effects].reverse()) {
+      const active = time >= effect.time - .08 && time <= effect.time + effect.duration + .08;
+      const radius = Math.max(46, 80 * Math.max(.25, effect.strength || 1));
+      if (active && Math.hypot(q.x - effect.x, q.y - effect.y) <= radius) {
+        onSelectEffect(effect.id);
+        onSelectProp(null);
+        drag.current = {
+          char: "",
+          effectId: effect.id,
+          effectPosition: { x: effect.x, y: effect.y },
+          mode,
+          pose: basePose(q.x, q.y),
+          transform: { rotation: 0, scaleX: 1, scaleY: 1, flipH: false, flipV: false },
+          start: q,
+        };
+        onGestureStart();
+        ref.current!.setPointerCapture(e.pointerId);
+        return;
+      }
+    }
     for (const prop of [...(project.props ?? [])].reverse()) {
       if (!prop.visible || prop.locked) continue;
       const tf = propTransformAt(project.propTracks?.[prop.id], time);
+      const size=propHitSize(prop.type),angle=-tf.rotation*Math.PI/180,dx=q.x-tf.x,dy=q.y-tf.y,localX=dx*Math.cos(angle)-dy*Math.sin(angle),localY=dx*Math.sin(angle)+dy*Math.cos(angle);
       if (
-        Math.abs(q.x - tf.x) < 75 * Math.abs(tf.scaleX) &&
-        Math.abs(q.y - tf.y) < 75 * Math.abs(tf.scaleY)
+        Math.abs(localX) < size.x * Math.abs(tf.scaleX) &&
+        Math.abs(localY) < size.y * Math.abs(tf.scaleY)
       ) {
+        onSelectEffect(null);
         onSelectProp(prop.id);
         drag.current = {
           char: "",
@@ -676,14 +980,18 @@ export function CanvasView({
         hit = { char: ch.id, pose, transform };
     }
     if (hit) {
+      onSelectEffect(null);
       onSelectProp(null);
       onSelect(hit.char, e.shiftKey);
       const local = invertTransform(q, hit.pose.root, hit.transform);
       let joint: JointName | undefined;
-      if (mode === "pose")
-        for (const j of joints)
-          if (Math.hypot(hit.pose[j].x - local.x, hit.pose[j].y - local.y) < 38)
-            joint = j;
+      if (mode === "pose") {
+        let nearest=38;
+        for (const j of joints) {
+          const distance=Math.hypot(hit.pose[j].x-local.x,hit.pose[j].y-local.y);
+          if(distance<nearest){nearest=distance;joint=j}
+        }
+      }
       drag.current = {
         char: hit.char,
         mode,
@@ -699,9 +1007,11 @@ export function CanvasView({
     }
   };
   const move = (e: React.PointerEvent) => {
-    if (!drag.current) return;
+    if (!drag.current) {const hit=nearestJoint(e);setHoverJoint(hit?{char:hit.char,joint:hit.joint}:null);return;}
     const q = point(e),
       d = drag.current;
+    if(d.pathAction&&d.pathStart&&onPathChange){const next=structuredClone(d.pathStart),dx=q.x-d.start.x,dy=q.y-d.start.y;if(d.pathAction==="draw"){d.freeDraw!.push(q);const points=simplifyFreeDraw(d.freeDraw!,7);next.points=smoothPoints(points)}else if(d.pathAction==="move")next.points.forEach(p=>{p.x+=dx;p.y+=dy;if(p.in){p.in.x+=dx;p.in.y+=dy}if(p.out){p.out.x+=dx;p.out.y+=dy}});else{const anchor=next.points[d.pathPoint!],target=d.pathAction==="anchor"?anchor:anchor[d.pathAction]!;const old={x:target.x,y:target.y};target.x+=dx;target.y+=dy;if(d.pathAction==="anchor"){const ax=target.x-old.x,ay=target.y-old.y;if(anchor.in){anchor.in.x+=ax;anchor.in.y+=ay}if(anchor.out){anchor.out.x+=ax;anchor.out.y+=ay}}}next.updatedAt=new Date().toISOString();onPathChange(next);return}
+    if(d.joint&&d.startClient&&!d.moved){if(Math.hypot(e.clientX-d.startClient.x,e.clientY-d.startClient.y)<3)return;d.moved=true;}
     if (d.mode === "camera" && d.camera) {
       if (d.cameraAction === "pan") {
         const format=project.format??{width:1080,height:1920};
@@ -722,6 +1032,13 @@ export function CanvasView({
         if (e.shiftKey) rotation = Math.round(rotation / 5) * 5;
         onCameraChange({ ...d.camera, rotation });
       }
+      return;
+    }
+    if (d.effectId && d.effectPosition) {
+      if (d.mode === "move") onEffectChange(d.effectId, {
+        x: d.effectPosition.x + q.x - d.start.x,
+        y: d.effectPosition.y + q.y - d.start.y,
+      });
       return;
     }
     if (d.propId) {
@@ -785,17 +1102,19 @@ export function CanvasView({
         scaleY: d.transform.scaleY * ratio,
       });
     } else if (d.joint) {
-      const p = structuredClone(d.pose),
-        local = invertTransform(q, p.root, d.transform);
-      p[d.joint] = local;
+      const local = invertTransform(q, d.pose.root, d.transform),
+        p = editRigJoint(d.pose,d.joint,local);
       onPoseChange(d.char, p);
     }
   };
-  const up = () => {
+  const up = (e:React.PointerEvent) => {
     if (drag.current) {
       drag.current = null;
       onGestureEnd();
     }
+    if(ref.current?.hasPointerCapture(e.pointerId))ref.current.releasePointerCapture(e.pointerId);
+    gestureView.current=null;
+    const hit=nearestJoint(e);setHoverJoint(hit?{char:hit.char,joint:hit.joint}:null);
   };
   const previewAspect=(project.format?.width??1080)/(project.format?.height??1920),
     bitmapWidth=previewCamera?(previewAspect>=1?720:Math.round(480*previewAspect)):720,
@@ -813,17 +1132,19 @@ export function CanvasView({
         height: "auto",
         maxWidth: "calc(100% - 24px)",
         maxHeight: "calc(100% - 24px)",
-        cursor: mode === "camera" && !previewCamera ? "move" : "default",
+        cursor: drag.current?.joint ? "grabbing" : mode === "pose"&&hoverJoint ? "grab" : mode === "camera" && !previewCamera ? "move" : "default",
       }}
       onPointerDown={down}
       onPointerMove={move}
       onPointerUp={up}
       onPointerCancel={up}
+      onPointerLeave={()=>{if(!drag.current)setHoverJoint(null)}}
       onContextMenu={(e) => {
         e.preventDefault();
+        if(pathEditing&&activePath&&onPathChange&&activePath.points.length>2){const q=point(e),view=editorView(),rect=ref.current!.getBoundingClientRect(),hit=16/(view.zoom*rect.width/view.width),index=activePath.points.findIndex(p=>Math.hypot(p.x-q.x,p.y-q.y)<=hit);if(index>=0){const next=structuredClone(activePath);next.points.splice(index,1);onPathChange(next);return}}
         onContextMenu(e.clientX, e.clientY);
       }}
-      onDoubleClick={() => {}}
+      onDoubleClick={(e) => {if(!pathEditing||!activePath||!onPathChange||activePath.pathType==="straight")return;const q=point(e),table=pathLookup(activePath),nearest=table.reduce((best,item)=>Math.hypot(item.point.x-q.x,item.point.y-q.y)<Math.hypot(best.point.x-q.x,best.point.y-q.y)?item:best,table[0]);if(!nearest)return;const next=structuredClone(activePath),inserted={id:crypto.randomUUID(),x:nearest.point.x,y:nearest.point.y};next.points.splice(nearest.segment+1,0,inserted);if(next.pathType==="bezier"||next.pathType==="free-draw")next.points=smoothPoints(next.points);onPathChange(next)}}
     />
   );
 }

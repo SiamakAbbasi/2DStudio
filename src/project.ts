@@ -7,8 +7,20 @@ export function migrateProject(input: Project): Project {
   p.tracks ??= {};
   p.props ??= [];
   p.propTracks ??= {};
+  p.motionPaths ??= [];
+  p.pathVisibility ??= "selected";
   p.dance ??= { bpm: 120, beatGrid: false, snapToBeat: false };
   p.motionReviews ??= [];
+  p.customActions ??= [];
+  p.actionCategories ??= [];
+  p.actionCategoryMeta ??= p.actionCategories.map((name, sortOrder) => ({
+    id: `category_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+    name,
+    sortOrder,
+    isSystem: false,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  }));
   if (p.master) {
     p.master.format ??= structuredClone(p.format);
     p.master.clips.forEach((clip) => {
@@ -21,6 +33,14 @@ export function migrateProject(input: Project): Project {
     actor.preset ??= "standard";
     actor.locked ??= false;
     actor.layer ??= index * 10 + 10;
+    actor.appearance ??= {
+      primaryColor: actor.color,
+      accentColor: "#dcecff",
+      head: "none",
+      face: "none",
+      body: "none",
+    };
+    actor.equipment ??= "none";
     p.tracks[actor.id] ??= [
       {
         id: uid(),

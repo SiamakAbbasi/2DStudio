@@ -1,6 +1,7 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { actions } from "./actions";
+import { ActionPreview } from "./ActionPreview";
 import {
   basePose,
   cameraAt,
@@ -14,16 +15,24 @@ import {
 } from "./animation";
 import { CanvasView, drawScene, type TransformMode } from "./CanvasView";
 import { blankProject, demoProject, migrateProject } from "./project";
-import { mirrored, poses } from "./poses";
-import { Timeline, type TimelineKeyRef } from "./Timeline";
+import { mirrored, orientedPose, poses, type PoseOrientation } from "./poses";
+import { Timeline, type TimelineKeyRef, type TimelineSnap } from "./Timeline";
 import { PoseBrowser } from "./PoseBrowser";
+import { CharacterSelect } from "./CharacterSelect";
 import { insertSpecialMove, specialMoves } from "./specialMoves";
 import { compileScenarioV2 } from "./scenarioV2";
 import { danceStyles } from "./danceData";
-import type { Ease, EffectType, Pose, Project } from "./types";
+import type { Action, CharacterAsset, Ease, EffectType, MotionPath, MotionPathType, Pose, Project } from "./types";
 import type {MotionFrame} from "./motionCapture";
+import { effectParamsAt, upsertEffectKey } from "./effectAnimation";
 import {commitMasterClipSource} from "./masterSequence";
 import {restoreSceneDoc,sceneDoc} from "./sceneState";
+import {applyTimelineSequence,validateTimelineSequence,type TimelineSequence} from "./timelineCommands";
+import {authoredAutoMotionAnchors,clearAutoMotionKeys,detachAutoMotionKey,generateAutoMotionKeys,type AutoMotionDensity,type AutoMotionTiming} from "./autoMotion";
+import {PathPanel} from "./PathPanel";
+import {bakeMotionPath,createMotionPath,detachMotionPathKey,previewPathProject} from "./motionPath";
+import {detachManualKey,duplicateEntries} from "./timelineAuthoring";
+import {ToolDrawerHeader} from "./ToolDrawer";
 import "./style.css";
 import "./guide.css";
 const actionGlyph: Record<string, string> = {
@@ -86,6 +95,27 @@ const FORMATS = [
     height: 1350,
   },
 ];
+const DEFAULT_ACTION_CATEGORIES = [
+  "Movement", "Fight", "Lifestyle", "Acting", "Interaction", "Dance", "Fantasy",
+  "Social", "Romance", "Family", "Sword / Melee", "Cinematic Action", "Reactions", "Prop Interaction",
+];
+type ActionEditorState = {
+  id?: string;
+  name: string;
+  description: string;
+  category: string;
+  source: "selection" | "range";
+  start: number;
+  end: number;
+  actor: string;
+  paired: boolean;
+  secondaryActor: string;
+  facing: "original" | "left" | "right";
+  rootMotion: "relative" | "in-place";
+  favorite: boolean;
+  replaceMotion: boolean;
+};
+type AutoMotionEditorState={actor:string;start:number;end:number;anchorIds?:string[];easing:AutoMotionTiming;density:AutoMotionDensity;groupId?:string};
 const restoredSession = (() => {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
@@ -102,14 +132,21 @@ const restoredSession = (() => {
     return null;
   }
 })();
-export default function App() {
+export type StudioSaveStatus = "saved" | "saving" | "error" | "conflict";
+export interface StudioAppProps {
+  initialProject?: Project;
+  onProjectChange?: (project: Project) => void;
+  saveStatus?: StudioSaveStatus;
+  onExitProject?: () => void;
+}
+export default function App({ initialProject, onProjectChange, saveStatus, onExitProject }: StudioAppProps = {}) {
   const [p, setP] = useState<Project>(
-      () => restoredSession?.project ?? demoProject(),
+      () => initialProject ? migrateProject(structuredClone(initialProject)) : restoredSession?.project ?? demoProject(),
     ),
     [time, setTime] = useState(() =>
       Math.min(
-        restoredSession?.time ?? 0,
-        restoredSession?.project?.duration ?? 5,
+        initialProject ? 0 : restoredSession?.time ?? 0,
+        initialProject?.duration ?? restoredSession?.project?.duration ?? 5,
       ),
     ),
     [playing, setPlaying] = useState(false),
@@ -118,10 +155,12 @@ export default function App() {
       restoredSession?.selected ?? "a",
     ]),
     [selectedProp, setSelectedProp] = useState<string | null>(null),
+    [selectedEffect, setSelectedEffect] = useState<string | null>(null),
     [clip, setClip] = useState<Pose | null>(null),
     [ease, setEase] = useState<Ease>("ease-in-out"),
     [help, setHelp] = useState(false),
     [newProjectOpen, setNewProjectOpen] = useState(false),
+    [characterSelectOpen,setCharacterSelectOpen]=useState(false),
     [newTemplate, setNewTemplate] = useState("Blank"),
     [managerOpen, setManagerOpen] = useState(false),
     [scenarioOpen, setScenarioOpen] = useState(false),
@@ -142,6 +181,7 @@ export default function App() {
   "events": [{"time":1,"actor":"anna","action":"walk"},{"time":4,"action":"hug","participants":["anna","john"]},{"time":7,"actor":"child","action":"wave"}]
 }`),
     [poseBrowserOpen, setPoseBrowserOpen] = useState(false),
+    [poseOrientation,setPoseOrientation]=useState<PoseOrientation>("FRONT"),
     [posePreview, setPosePreview] = useState<{
       id: string;
       pose: Pose;
@@ -151,8 +191,16 @@ export default function App() {
     [autoFace, setAutoFace] = useState(false),
     [actionCategory, setActionCategory] = useState("Fight"),
     [actionSearch, setActionSearch] = useState(""),
-    [favorites, setFavorites] = useState<string[]>([]),
-    [recent, setRecent] = useState<string[]>([]),
+    [favorites, setFavorites] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem("flip-action-favorites") || "[]"); } catch { return []; } }),
+    [recent, setRecent] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem("flip-action-recent") || "[]"); } catch { return []; } }),
+    [actionLastUsed, setActionLastUsed] = useState<Record<string,string>>(() => { try { return JSON.parse(localStorage.getItem("flip-action-last-used") || "{}"); } catch { return {}; } }),
+    [actionEditor, setActionEditor] = useState<ActionEditorState | null>(null),
+    [actionNewCategory, setActionNewCategory] = useState(""),
+    [autoMotionEditor,setAutoMotionEditor]=useState<AutoMotionEditorState|null>(null),
+    [autoMotionPreview,setAutoMotionPreview]=useState<Project|null>(null),
+    [selectedPath,setSelectedPath]=useState<string|null>(null),
+    [pathPreview,setPathPreview]=useState(false),
+    [pathEditing,setPathEditing]=useState(false),
     [interactionAction, setInteractionAction] = useState<string | null>(null),
     [interactionActors, setInteractionActors] = useState<string[]>([]),
     [danceStyle, setDanceStyle] = useState("Techno"),
@@ -167,14 +215,20 @@ export default function App() {
     ),
     [canvasEditing, setCanvasEditing] = useState(false),
     [cameraPreview, setCameraPreview] = useState(false),
+    [masterPlaybackMode, setMasterPlaybackMode] = useState<"scene"|"sequence">("scene"),
     [cameraSafeArea, setCameraSafeArea] = useState(false),
+    [workspaceZoom, setWorkspaceZoom] = useState(() => Math.max(1, Math.min(4, +(localStorage.getItem("flip-ui-workspace-zoom") || 1)))),
     [timelineHeight, setTimelineHeight] = useState(() => +(localStorage.getItem("flip-ui-timeline-height") || 246)),
     [timelineCollapsed, setTimelineCollapsed] = useState(() => localStorage.getItem("flip-ui-timeline-collapsed") === "1"),
     [timelineSelection, setTimelineSelection] = useState<TimelineKeyRef[]>([]),
+    [timelineSnap,setTimelineSnap]=useState<TimelineSnap>(".02"),
+    [duplicateOffset,setDuplicateOffset]=useState(.08),
+    [actionRange, setActionRange] = useState<{start:number;end:number}|null>(null),
     [leftWidth, setLeftWidth] = useState(() => Math.max(320, +(localStorage.getItem("flip-ui-left-width") || 360))),
     [leftDrawer, setLeftDrawer] = useState<"scene" | "actions" | null>(null),
     [rightWidth, setRightWidth] = useState(() => +(localStorage.getItem("flip-ui-right-width") || 280)),
     [inspectorHidden, setInspectorHidden] = useState(false),
+    [rightTool,setRightTool]=useState<"transform"|"path"|"camera"|"effects"|"timing"|"background">("transform"),
     [library, setLibrary] = useState<Record<string, Project>>(() => {
       try {
         return JSON.parse(localStorage.getItem(LIBRARY_KEY) || "{}");
@@ -188,6 +242,37 @@ export default function App() {
     undoStack = useRef<Project[]>([]),
     redoStack = useRef<Project[]>([]);
   const timelineClipboard = useRef<{ track: string; key: any; offset: number }[]>([]);
+  const allActions = useMemo(() => {
+    const overrides = new Map((p.customActions ?? []).map((action) => [action.id, action]));
+    const builtInIds = new Set(actions.map((action) => action.id));
+    return [
+      ...actions.map((action) => overrides.get(action.id) ?? action),
+      ...(p.customActions ?? []).filter((action) => !builtInIds.has(action.id)),
+    ];
+  }, [p.customActions]);
+  const linkedActionContext = useMemo(() => {
+    const instances=new Map<string,{instanceId:string;actionId:string;actorIds:Set<string>;start:number;end:number}>();
+    for(const [actorId,track] of Object.entries(p.tracks))for(const key of track){
+      if(!key.actionInstanceId||!key.actionId)continue;
+      const found=instances.get(key.actionInstanceId)??{instanceId:key.actionInstanceId,actionId:key.actionId,actorIds:new Set<string>(),start:key.time,end:key.time};
+      found.actorIds.add(actorId);found.start=Math.min(found.start,key.time);found.end=Math.max(found.end,key.time);instances.set(key.actionInstanceId,found);
+    }
+    const selectedPoseKeys=timelineSelection.flatMap(ref=>p.tracks[ref.track]?.find(key=>key.id===ref.id)?[{actorId:ref.track,key:p.tracks[ref.track].find(key=>key.id===ref.id)!}]:[]),
+      selectedInstances=new Set(selectedPoseKeys.map(item=>item.key.actionInstanceId).filter(Boolean) as string[]);
+    let instance=selectedInstances.size===1?instances.get([...selectedInstances][0]):undefined;
+    if(selectedInstances.size>1)return null;
+    if(!instance)instance=[...instances.values()].filter(item=>item.actorIds.has(sel)&&time>=item.start-.025&&time<=item.end+.025).sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+    if(!instance)return null;
+    const selectedForActors=selectedPoseKeys.filter(item=>instance!.actorIds.has(item.actorId));
+    const start=selectedInstances.size&&selectedForActors.length?Math.min(instance.start,...selectedForActors.map(item=>item.key.time)):instance.start,
+      end=selectedInstances.size&&selectedForActors.length?Math.max(instance.end,...selectedForActors.map(item=>item.key.time)):instance.end,
+      action=allActions.find(item=>item.id===instance!.actionId);
+    return action?{...instance,actorIds:[...instance.actorIds],start,end,name:action.name}:null;
+  },[p.tracks,timelineSelection,sel,time,allActions]);
+  const actionLinkFor=(actorId:string,at=time)=>linkedActionContext&&linkedActionContext.actorIds.includes(actorId)&&at>=linkedActionContext.start-.025&&at<=linkedActionContext.end+.025
+    ? {actionId:linkedActionContext.actionId,actionInstanceId:linkedActionContext.instanceId}
+    : {};
+  const actionCategories = useMemo(() => Array.from(new Set([...DEFAULT_ACTION_CATEGORIES, ...(p.actionCategories ?? [])])), [p.actionCategories]);
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
@@ -201,6 +286,15 @@ export default function App() {
     }, 250);
     return () => window.clearTimeout(timer);
   }, [p, time, sel]);
+  useEffect(() => {
+    localStorage.setItem("flip-action-favorites", JSON.stringify(favorites));
+    localStorage.setItem("flip-action-recent", JSON.stringify(recent));
+    localStorage.setItem("flip-action-last-used", JSON.stringify(actionLastUsed));
+  }, [favorites, recent, actionLastUsed]);
+  const markActionUsed=(name:string)=>{setRecent(old=>[name,...old.filter(item=>item!==name)].slice(0,20));setActionLastUsed(old=>({...old,[name]:new Date().toISOString()}));};
+  useEffect(() => {
+    onProjectChange?.(p);
+  }, [p, onProjectChange]);
   useEffect(() => () => {
     if (motionReviewSource) URL.revokeObjectURL(motionReviewSource.url);
   }, [motionReviewSource]);
@@ -209,7 +303,8 @@ export default function App() {
     localStorage.setItem("flip-ui-timeline-collapsed", timelineCollapsed ? "1" : "0");
     localStorage.setItem("flip-ui-left-width", String(leftWidth));
     localStorage.setItem("flip-ui-right-width", String(rightWidth));
-  }, [timelineHeight, timelineCollapsed, leftWidth, rightWidth]);
+    localStorage.setItem("flip-ui-workspace-zoom", String(workspaceZoom));
+  }, [timelineHeight, timelineCollapsed, leftWidth, rightWidth, workspaceZoom]);
   const update = (f: (x: Project) => void) =>
     setP((o) => {
       undoStack.current.push(structuredClone(o));
@@ -217,9 +312,20 @@ export default function App() {
       redoStack.current = [];
       const n = structuredClone(o);
       f(n);
+      n.duration = Math.round(n.duration * 1000) / 1000;
       return n;
     });
+  const activePath=p.motionPaths?.find(path=>path.id===selectedPath)??null;
+  const pathPreviewProject=pathPreview&&activePath?previewPathProject(p,activePath,time):null;
+  const newPath=(type:MotionPathType)=>{const targetType=selectedProp?"prop":"character",targetId=selectedProp??sel;if(!targetId)return;const start=actionRange?.start??Math.min(time,Math.max(0,p.duration-.001)),path=createMotionPath(p,targetId,targetType,type,start);if(actionRange&&actionRange.end>actionRange.start){path.startTime=actionRange.start;path.endTime=actionRange.end}else path.endTime=Math.min(p.duration,start+1);update(n=>{n.motionPaths??=[];n.motionPaths.push(path)});setSelectedPath(path.id);setPathPreview(false);setPathEditing(true);setRightTool("path");setInspectorHidden(false)};
+  const changePath=(path:MotionPath)=>update(n=>{const index=(n.motionPaths??[]).findIndex(x=>x.id===path.id);if(index>=0)n.motionPaths![index]=path});
+  const changePathLive=(path:MotionPath)=>setP(old=>{const next=structuredClone(old),index=(next.motionPaths??[]).findIndex(x=>x.id===path.id);if(index>=0)next.motionPaths![index]=path;return next});
+  const duplicatePath=()=>{if(!activePath)return;const copy=structuredClone(activePath);copy.id=`path_${uid()}`;copy.name+=` Copy`;copy.points.forEach(point=>{point.id=uid();point.x+=30;point.y+=30;if(point.in){point.in.x+=30;point.in.y+=30}if(point.out){point.out.x+=30;point.out.y+=30}});copy.createdAt=copy.updatedAt=new Date().toISOString();update(n=>{n.motionPaths??=[];n.motionPaths.push(copy)});setSelectedPath(copy.id)};
+  const deletePath=()=>{if(!activePath)return;const generated=(activePath.targetType==="character"?p.tracks[activePath.targetId]:p.propTracks?.[activePath.targetId])?.some(key=>key.motionPathId===activePath.id);if(generated&&!confirm("This Path has baked Timeline keys. Delete only the editor Path and keep baked animation?"))return;update(n=>{n.motionPaths=(n.motionPaths??[]).filter(x=>x.id!==activePath.id)});setSelectedPath(null);setPathPreview(false)};
+  const togglePathPreview=()=>{if(!activePath)return;if(pathPreview){setPathPreview(false);setPlaying(false);return}seek(activePath.startTime);setPathPreview(true);setPlaying(true)};
+  const bakePath=()=>{if(!activePath)return;try{replaceProjectKeepingView(bakeMotionPath(p,activePath));setPathPreview(false)}catch(error){alert(error instanceof Error?error.message:String(error))}};
   const replaceProject = (next: Project) => {
+    next.duration = Math.round(next.duration * 1000) / 1000;
     undoStack.current.push(structuredClone(p));
     redoStack.current = [];
     setP(next);
@@ -230,6 +336,27 @@ export default function App() {
     setTimelineSelection([]);
     seek(0);
   };
+  const replaceProjectKeepingView = (next: Project) => {
+    next.duration = Math.round(next.duration * 1000) / 1000;
+    undoStack.current.push(structuredClone(p));
+    if (undoStack.current.length > 80) undoStack.current.shift();
+    redoStack.current = [];
+    setP(next);
+  };
+  const applySequence=(sequence:TimelineSequence)=>{
+    const validation=validateTimelineSequence(p,sequence);
+    if(validation!=="VALID")throw new Error(validation);
+    const result=applyTimelineSequence(p,sequence);
+    replaceProjectKeepingView(result.project);
+    return result;
+  };
+  const handledSequenceRequests=useRef(new Set<string>());
+  useEffect(()=>{
+    let active=true,busy=false;
+    const poll=async()=>{if(!active||busy)return;busy=true;try{const response=await fetch("/__codex/timeline-sequence",{cache:"no-store"});if(!response.ok)return;const request=await response.json() as {requestId:string;sequence:TimelineSequence}|null;if(!request||handledSequenceRequests.current.has(request.requestId))return;handledSequenceRequests.current.add(request.requestId);try{const result=applySequence(request.sequence);await fetch("/__codex/timeline-sequence/result",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:request.requestId,ok:true,commands:result.inserted.length})})}catch(error){await fetch("/__codex/timeline-sequence/result",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:request.requestId,ok:false,error:error instanceof Error?error.message:String(error)})})}}catch{/* Bridge is dev-only; production and preview continue normally. */}finally{busy=false}};
+    void poll();const timer=setInterval(poll,600);return()=>{active=false;clearInterval(timer)};
+  },[p]);
+  useEffect(()=>{void fetch("/__codex/project-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:p.name,duration:p.duration,actors:p.characters.map(actor=>({id:actor.id,name:actor.name,keyframes:p.tracks[actor.id]?.length??0}))})}).catch(()=>{})},[p]);
   const undo = () => {
     const previous = undoStack.current.pop();
     if (!previous) return;
@@ -295,31 +422,22 @@ export default function App() {
         },
       ];
     });
-  const addActor = (
-    preset: import("./types").Character["preset"] = "standard",
-  ) => {
-    const id = `actor_${uid().slice(-8)}`,
-      name = prompt(
-        "Character name",
-        `Character ${p.characters.length + 1}`,
-      )?.trim();
-    if (!name) return;
-    const choice = prompt(
-      "Preset: standard, male, female, child, large, small",
-      preset,
-    )
-      ?.trim()
-      .toLowerCase();
-    if (
-      ["standard", "male", "female", "child", "large", "small"].includes(
-        choice ?? "",
-      )
-    )
-      preset = choice as typeof preset;
-    addFighter(id, preset, name);
-    setSel(id);
-    setSelectedActors([id]);
-    setSelectedProp(null);
+  const addActor = () => setCharacterSelectOpen(true);
+  const addCharacterAssetToScene=(asset:CharacterAsset)=>{
+    const id=`actor_${uid().slice(-8)}`;
+    update(n=>{
+      const format=n.format??{width:1080,height:1920},ground=Math.min(910,format.height*.8),index=n.characters.length,
+        scale=asset.bodyProfile==="child"?.7:asset.bodyProfile==="small"?.82:asset.bodyProfile==="large"?1.24:asset.bodyProfile==="female"?.96:asset.bodyProfile==="male"?1.04:1,
+        pose=basePose(format.width*(.23+(index%4)*.18),ground-190,index%2===1);
+      n.characters.push({id,name:asset.name,type:"stick_character",preset:asset.bodyProfile,color:asset.appearance.primaryColor,pose,flip:index%2===1,scale,rotation:0,visible:true,characterAssetId:asset.id,appearance:structuredClone(asset.appearance),equipment:asset.equipment});
+      n.tracks[id]=[{id:uid(),time:0,pose,easing:"ease-in-out",scaleX:scale,scaleY:scale}];
+      if(asset.equipment!=="none"){
+        n.props??=[];n.propTracks??={};const propId=`equipment_${uid().slice(-8)}`;
+        n.props.push({id:propId,name:`${asset.name} ${asset.equipment}`,type:asset.equipment,color:asset.appearance.accentColor,visible:true,locked:false,layer:(index+1)*10+5});
+        n.propTracks[propId]=[{id:uid(),time:0,x:0,y:0,rotation:0,scaleX:.72,scaleY:.72,flipH:false,opacity:1,attachment:{actorId:id,joint:"rightWrist",offsetX:0,offsetY:0,rotation:0},easing:"linear"}];
+      }
+    });
+    setSel(id);setSelectedActors([id]);setSelectedProp(null);setCharacterSelectOpen(false);
   };
   const addProp = (type: import("./types").PropType) => {
     const id = `prop_${uid().slice(-8)}`;
@@ -331,7 +449,7 @@ export default function App() {
         name: type[0].toUpperCase() + type.slice(1),
         type,
         color:
-          type === "sword"
+          type === "sword" || type === "knife" || type === "spear" || type === "gun"
             ? "#b8c6d8"
             : type === "flower"
               ? "#ff6b9d"
@@ -377,7 +495,10 @@ export default function App() {
         n.propTracks[id] = track;
       }
       Object.assign(key, partial);
+      detachMotionPathKey(key);
     });
+  const addPropKey=(id:string)=>update(n=>{n.propTracks??={};const track=n.propTracks[id]??=[];track.push({id:uid(),time,easing:ease,...propTransformAt(track,time)});n.propTracks[id]=track;});
+  const deleteKeyAtPlayhead=()=>update(n=>{if(selectedProp){n.propTracks??={};n.propTracks[selectedProp]=(n.propTracks[selectedProp]??[]).filter(key=>Math.abs(key.time-time)>=.04);}else n.tracks[sel]=(n.tracks[sel]??[]).filter(key=>Math.abs(key.time-time)>=.04);});
   const duplicateProp = (id: string) =>
     update((n) => {
       const source = n.props?.find((x) => x.id === id);
@@ -431,6 +552,7 @@ export default function App() {
         n.propTracks[id] = track;
       }
       Object.assign(key, tf);
+      detachMotionPathKey(key);
       return n;
     });
   const saveToLibrary = () => {
@@ -527,10 +649,16 @@ export default function App() {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [playing, p]);
+  useEffect(()=>{if(pathPreview&&activePath&&time>=activePath.endTime){setPlaying(false);setPathPreview(false);setTime(activePath.endTime);rt.current=activePath.endTime;last.current=0}},[time,pathPreview,activePath]);
   const seek = (t: number) => {
     setTime(t);
     rt.current = t;
     last.current = 0;
+  };
+  const stopPlayback = () => {
+    setPlaying(false);
+    setPathPreview(false);
+    seek(0);
   };
   const addKey = (pose?: Pose) =>
     update((n) => {
@@ -540,14 +668,18 @@ export default function App() {
         time,
         pose: clonePose(pose ?? poseAt(n.tracks[sel], time)),
         easing: ease,
+        ...actionLinkFor(sel),
         ...tf,
       });
     });
   const current = poseAt(p.tracks[sel], time);
   const alignedBuiltInPose = (name: string, fighter: string) => {
     if (!poses[name]) return;
-    let next = clonePose(poses[name]);
-    if (p.characters.find((c) => c.id === fighter)?.flip) next = mirrored(next);
+    let next = orientedPose(poses[name],poseOrientation);
+    // Pose orientation owns the authored presentation here. Character/Fight
+    // facing only mirrors FRONT poses; directional pose geometry must never be
+    // mirrored a second time by the render transform.
+    if (poseOrientation==="FRONT"&&p.characters.find((c) => c.id === fighter)?.flip) next = mirrored(next);
     const actual = poseAt(p.tracks[fighter], time);
     const dx = actual.root.x - next.root.x;
     const dy = actual.root.y - next.root.y;
@@ -570,13 +702,14 @@ export default function App() {
       const k = forceNew
         ? undefined
         : n.tracks[fighter].find((x) => Math.abs(x.time - time) < 0.025);
-      if (k) k.pose = next;
+      if (k) {detachAutoMotionKey(k);k.pose = next;}
       else
         n.tracks[fighter].push({
           id: uid(),
           time,
           pose: next,
           easing: ease,
+          ...actionLinkFor(fighter),
           ...tf,
         });
     });
@@ -585,9 +718,10 @@ export default function App() {
     update((n) => {
       let k = n.tracks[sel].find((x) => Math.abs(x.time - time) < 0.025);
       if (!k) {
-        k = { id: uid(), time, pose, easing: ease };
+        k = { id: uid(), time, pose, easing: ease, ...actionLinkFor(sel) };
         n.tracks[sel].push(k);
       }
+      detachAutoMotionKey(k);
       k.pose = pose;
     });
   const mutateCurrentKey = (
@@ -606,10 +740,13 @@ export default function App() {
         time,
         pose: clonePose(pose ?? poseAt(n.tracks[fighter], time)),
         easing: ease,
+        ...actionLinkFor(fighter),
         ...tf,
       };
       track.push(k);
     }
+    detachAutoMotionKey(k);
+    detachMotionPathKey(k);
     if (pose) k.pose = clonePose(pose);
     if (transform) Object.assign(k, transform);
   };
@@ -693,12 +830,18 @@ export default function App() {
         .sort((a, b) => a.distance - b.distance)[0]?.id;
     if (!other) return;
     const them = poseAt(n.tracks[other], time).root.x;
-    const tf = transformAt(n.tracks[fighter], time);
-    mutateCurrentKey(n, fighter, undefined, {
+    const tf = transformAt(n.tracks[fighter], time), character=n.characters.find((c)=>c.id===fighter);
+    const desiredLeft = me > them;
+    let visualPose = clonePose(poseAt(n.tracks[fighter], time));
+    if (tf.flipH) visualPose = mirrored(visualPose);
+    const currentLeft = (character?.flip ?? false) !== tf.flipH;
+    if (currentLeft !== desiredLeft) visualPose = mirrored(visualPose);
+    if(character)character.flip=desiredLeft;
+    mutateCurrentKey(n, fighter, visualPose, {
       ...tf,
-      // Authored poses face right. A fighter standing to the opponent's right
-      // must therefore be mirrored to face left.
-      flipH: me > them,
+      // Facing is materialized in pose space. Keeping the render transform
+      // neutral prevents a second, visually contradictory mirror.
+      flipH: false,
     });
   };
   const faceAllOpponentsIn = (n: Project) =>
@@ -815,9 +958,10 @@ export default function App() {
       }
       if (timelineSelection.length && commandKey && !e.altKey && shortcut === "d") {
         e.preventDefault();
-        pasteTimelineKeys(true);
+        duplicateTimelineKeys();
         return;
       }
+      if(timelineSelection.length&&e.altKey&&(e.key==="ArrowLeft"||e.key==="ArrowRight")){e.preventDefault();const step=timelineSnap==="off"?.001:timelineSnap==="frame"?1/p.fps:+timelineSnap;moveTimelineKeys(timelineSelection,(e.key==="ArrowLeft"?-1:1)*step);return}
       if (timelineSelection.length && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
         deleteTimelineKeys();
@@ -825,13 +969,19 @@ export default function App() {
       }
       if (
         poseBrowserOpen ||
-        /INPUT|SELECT|TEXTAREA/.test((e.target as HTMLElement)?.tagName)
+        /INPUT|SELECT|TEXTAREA|BUTTON/.test((e.target as HTMLElement)?.tagName) ||
+        (e.target as HTMLElement)?.isContentEditable
       )
         return;
-      if (e.key.toLowerCase() === "v") setTransformMode("move");
-      if (e.key.toLowerCase() === "r") setTransformMode("rotate");
-      if (e.key.toLowerCase() === "s") setTransformMode("scale");
-      if (e.key.toLowerCase() === "c") setTransformMode("camera");
+      if (e.code === "Space" && !e.repeat) {
+        e.preventDefault();
+        setPlaying((value) => !value);
+        return;
+      }
+      if (e.key.toLowerCase() === "v") {setTransformMode("move");setRightTool("transform");setInspectorHidden(false);setPathEditing(false)}
+      if (e.key.toLowerCase() === "r") {setTransformMode("rotate");setRightTool("transform");setInspectorHidden(false);setPathEditing(false)}
+      if (e.key.toLowerCase() === "s") {setTransformMode("scale");setRightTool("transform");setInspectorHidden(false);setPathEditing(false)}
+      if (e.key.toLowerCase() === "c") {setTransformMode("camera");setRightTool("camera");setInspectorHidden(false);setPathEditing(false)}
       if (e.key.toLowerCase() === "f") frameActors();
       if (e.key === "Escape") setLeftDrawer(null);
       if (e.key.toLowerCase() === "h") {
@@ -848,6 +998,22 @@ export default function App() {
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   });
+  const compileActionInteractions=(n:Project,action:Action,actorIds:string[],start:number,scale:number,propId:string|null)=>{
+    if(!propId||!action.interactionEvents?.length||!n.propTracks?.[propId])return;
+    const track=n.propTracks[propId];
+    for(const event of action.interactionEvents){
+      const eventTime=start+event.time*scale,actorId=actorIds[event.type==="TRANSFER"?(event.toActorIndex??1):(event.actorIndex??0)];
+      if(!actorId||!n.tracks[actorId])continue;
+      const joint=event.joint??"rightWrist",pose=poseAt(n.tracks[actorId],eventTime),prior=propTransformAt(track,eventTime),point=pose[joint];
+      if(event.type==="GRAB"||event.type==="CATCH"||event.type==="TRANSFER"){
+        track.push({id:uid(),time:Math.max(start,eventTime-.01),easing:"hold",...prior,attachment:prior.attachment});
+        track.push({id:uid(),time:eventTime,easing:"snap",...prior,x:0,y:0,attachment:{actorId,joint,offsetX:0,offsetY:0,rotation:0}});
+      }else{
+        track.push({id:uid(),time:eventTime,easing:"snap",...prior,x:point.x,y:point.y,attachment:null});
+      }
+    }
+    track.sort((a,b)=>a.time-b.time);
+  };
   const insert = (
     name: string,
     repetitions = 1,
@@ -858,42 +1024,45 @@ export default function App() {
       alert("First add and select a character.");
       return;
     }
-    const ac = actions.find((a) => a.name === name)!;
-    setRecent((old) => [name, ...old.filter((x) => x !== name)].slice(0, 8));
+    const ac = allActions.find((a) => a.name === name);
+    if (!ac) return;
+    markActionUsed(name);
+    const actionInstanceId=`action_instance_${uid()}`;
     update((n) => {
+      if(ac.facing&&ac.facing!=="original") actorIds.forEach(actorId=>{const actor=n.characters.find(item=>item.id===actorId);if(actor)actor.flip=ac.facing==="left";});
       const beatDuration = 60 / (n.dance?.bpm ?? 120),
         iterationDuration = ac.beats ? ac.beats * beatDuration : ac.duration,
         scale = iterationDuration / ac.duration;
       actorIds.forEach((actorId, actorIndex) => {
-        const origin = poseAt(n.tracks[actorId], time).root,
-          startTf = transformAt(n.tracks[actorId], time);
+        const sourceTrack=structuredClone(n.tracks[actorId]),origin = poseAt(sourceTrack, time).root,
+          startTf = transformAt(sourceTrack, time),actor=n.characters.find((c) => c.id === actorId),
+          walkPathDriven=ac.id==="walk"&&(n.motionPaths??[]).some(path=>path.targetType==="character"&&path.targetId===actorId&&path.endTime>=time&&path.startTime<=time+iterationDuration*Math.max(1,repetitions));
         for (let repeat = 0; repeat < Math.max(1, repetitions); repeat++)
-          for (const q of ac.keyframes) {
-            let po = clonePose(poses[q.pose] ?? poses.idle);
+          for (const q of ac.keyframes.filter(key=>key.actorIndex===undefined||key.actorIndex===actorIndex)) {
+            let po = clonePose(q.inlinePose ?? poses[q.pose] ?? poses.idle);
+            if(ac.id==="walk"&&actor?.flip)po=mirrored(po);
             // Snapshot the authored pelvis before translating the pose.  Keeping
             // a reference to `po.root` makes the first loop iteration mutate the
             // anchor, so the root moves while every other joint keeps the old
             // offset (visually splitting the character at the waist).
-            const base = { ...po.root };
+            const base = { ...po.root },keyTime=time+repeat*iterationDuration+q.time*scale+actorIndex*stagger,
+              keyOrigin=walkPathDriven?poseAt(sourceTrack,keyTime).root:origin,
+              rootDx=walkPathDriven?0:(q.dx??0)*(actor?.flip?-1:1);
             for (const j in po) {
               po[j as keyof Pose].x +=
-                origin.x -
+                keyOrigin.x -
                 base.x +
-                (q.dx ?? 0) *
-                  (n.characters.find((c) => c.id === actorId)?.flip ? -1 : 1);
-              po[j as keyof Pose].y += origin.y - base.y + (q.dy ?? 0);
+                rootDx;
+              po[j as keyof Pose].y += keyOrigin.y - base.y + (q.dy ?? 0);
             }
-            const keyTime =
-                time +
-                repeat * iterationDuration +
-                q.time * scale +
-                actorIndex * stagger,
-              tf = transformAt(n.tracks[actorId], keyTime);
+            const tf = transformAt(sourceTrack, keyTime);
             n.tracks[actorId].push({
               id: uid(),
               time: keyTime,
               pose: po,
               easing: q.easing,
+              actionId: ac.id,
+              actionInstanceId,
               ...tf,
               rotation:
                 q.rootRotation !== undefined
@@ -902,6 +1071,7 @@ export default function App() {
             });
           }
       });
+      compileActionInteractions(n,ac,actorIds,time,scale,selectedProp);
       n.duration = Math.max(
         n.duration,
         time +
@@ -911,7 +1081,8 @@ export default function App() {
     });
   };
   const requestAction = (name: string) => {
-    const action = actions.find((x) => x.name === name)!;
+    const action = allActions.find((x) => x.name === name);
+    if (!action) return;
     const count = action.participants?.filter((x) => x === "actor").length ?? 1;
     if (count > 1) {
       setInteractionAction(name);
@@ -937,14 +1108,14 @@ export default function App() {
       actorIds.forEach((actorId, actorIndex) => {
         let cursor = time + actorIndex * stagger;
         for (const name of names) {
-          const action = actions.find((a) => a.name === name);
+          const action = allActions.find((a) => a.name === name);
           if (!action) continue;
           const duration = action.beats ? action.beats * beat : action.duration,
             scale = duration / action.duration,
             origin = poseAt(n.tracks[actorId], cursor).root,
             startTf = transformAt(n.tracks[actorId], cursor);
           for (const key of action.keyframes) {
-            const po = clonePose(poses[key.pose] ?? poses.idle),
+            const po = clonePose(key.inlinePose ?? poses[key.pose] ?? poses.idle),
               ox = po.root.x,
               oy = po.root.y;
             Object.values(po).forEach((j) => {
@@ -970,7 +1141,7 @@ export default function App() {
     });
   };
   const generateFreestyle = () => {
-    const pool = actions.filter(
+    const pool = allActions.filter(
       (a) =>
         a.categories?.includes("Dance") &&
         a.style === danceStyle &&
@@ -1028,8 +1199,9 @@ export default function App() {
       });
     });
   const insertInteraction = () => {
-    const action = actions.find((x) => x.name === interactionAction);
+    const action = allActions.find((x) => x.name === interactionAction);
     if (!action) return;
+    const actionInstanceId=`action_instance_${uid()}`;
     update((n) => {
       const duration = action.beats
           ? (action.beats * 60) / (n.dance?.bpm ?? 120)
@@ -1055,8 +1227,8 @@ export default function App() {
             { id: uid(), time, pose: approach, easing: "ease-out" },
           );
         const origin = index ? approach.root : leadRoot;
-        for (const key of action.keyframes) {
-          let po = clonePose(poses[key.pose] ?? poses.neutral_stand);
+        for (const key of action.keyframes.filter(key=>key.actorIndex===undefined||key.actorIndex===index)) {
+          let po = clonePose(key.inlinePose ?? poses[key.pose] ?? poses.neutral_stand);
           const ox = po.root.x,
             oy = po.root.y;
           Object.values(po).forEach((j) => {
@@ -1068,14 +1240,15 @@ export default function App() {
             time: time + key.time * scale,
             pose: po,
             easing: key.easing,
+            actionId: action.id,
+            actionInstanceId,
           });
         }
       });
+      compileActionInteractions(n,action,interactionActors,time,scale,selectedProp);
       n.duration = Math.max(n.duration, time + duration);
     });
-    setRecent((old) =>
-      [action.name, ...old.filter((x) => x !== action.name)].slice(0, 8),
-    );
+    markActionUsed(action.name);
     setInteractionAction(null);
   };
   const insertSpecial = (id: string) => {
@@ -1198,7 +1371,7 @@ export default function App() {
     const min = Math.min(...source.map((key) => key.time)), max = Math.max(...source.map((key) => key.time));
     const delta = Math.max(-min, Math.min(p.duration - max, requestedDelta));
     if (Math.abs(delta) < 0.0001) return;
-    update((n) => keys.forEach((ref) => { const key = timelineTrack(n, ref.track).find((item) => item.id === ref.id); if (key) key.time += delta; }));
+    update((n) => keys.forEach((ref) => { const key = timelineTrack(n, ref.track).find((item) => item.id === ref.id); if (key) {if(n.tracks[ref.track])detachAutoMotionKey(key);detachMotionPathKey(key);key.time += delta;} }));
   };
   const deleteTimelineKeys = () => {
     if (!timelineSelection.length) return;
@@ -1211,47 +1384,290 @@ export default function App() {
     const base = Math.min(...entries.map((entry) => entry.key.time));
     timelineClipboard.current = entries.map((entry) => ({ track: entry.ref.track, key: structuredClone(entry.key), offset: entry.key.time - base }));
   };
-  const pasteTimelineKeys = (duplicate = false) => {
-    if (duplicate) copyTimelineKeys();
+  const pasteTimelineKeys = (atPlayhead=time) => {
     if (!timelineClipboard.current.length) return;
-    const base = duplicate ? Math.min(p.duration, Math.max(...timelineClipboard.current.map((x) => x.key.time)) + 0.1) : time;
+    const maxOffset=Math.max(...timelineClipboard.current.map(x=>x.offset)),base=Math.max(0,Math.min(p.duration-maxOffset,atPlayhead));
     const created = timelineClipboard.current.map((entry) => ({ ...entry, id: uid(), time: Math.min(p.duration, base + entry.offset) }));
-    update((n) => created.forEach((entry) => timelineTrack(n, entry.track).push({ ...structuredClone(entry.key), id: entry.id, time: entry.time })));
+    update((n) => created.forEach((entry) => timelineTrack(n, entry.track).push({ ...detachManualKey(entry.key), id: entry.id, time: entry.time })));
     setTimelineSelection(created.map((entry) => ({ track: entry.track, id: entry.id })));
+  };
+  const duplicateTimelineKeys=(atPlayhead=false)=>{const entries=timelineSelection.map(ref=>({track:ref.track,key:timelineTrack(p,ref.track).find(key=>key.id===ref.id)})).filter(entry=>entry.key);if(!entries.length)return;const min=Math.min(...entries.map(entry=>entry.key.time)),max=Math.max(...entries.map(entry=>entry.key.time)),base=atPlayhead?time:Math.min(p.duration-(max-min),min+duplicateOffset),created=duplicateEntries(entries,base,uid);update(n=>created.forEach(entry=>timelineTrack(n,entry.track).push(entry.key)));setTimelineSelection(created.map(entry=>({track:entry.track,id:entry.key.id})))};
+  const retimePath=(id:string,mode:"move"|"start"|"end",delta:number)=>update(n=>{const path=n.motionPaths?.find(x=>x.id===id);if(!path)return;if(mode==="move"){const duration=path.endTime-path.startTime,next=Math.max(0,Math.min(n.duration-duration,path.startTime+delta));path.startTime=next;path.endTime=next+duration}else if(mode==="start")path.startTime=Math.max(0,Math.min(path.endTime-.001,path.startTime+delta));else path.endTime=Math.min(n.duration,Math.max(path.startTime+.001,path.endTime+delta));path.updatedAt=new Date().toISOString()});
+  const selectedActionRange = () => {
+    const keys = timelineSelection
+      .filter((ref) => Boolean(p.tracks[ref.track]))
+      .map((ref) => timelineTrack(p, ref.track).find((key) => key.id === ref.id))
+      .filter(Boolean);
+    return keys.length ? { start: Math.min(...keys.map((key) => key.time)), end: Math.max(...keys.map((key) => key.time)) } : null;
+  };
+  const openCreateAction = () => {
+    const range = actionRange ?? selectedActionRange();
+    setActionEditor({
+      name: "",
+      description: "",
+      category: !["Favorites","Recent","All Actions"].includes(actionCategory) ? actionCategory : "Lifestyle",
+      source: actionRange ? "range" : range ? "selection" : "range",
+      start: range?.start ?? time,
+      end: range?.end ?? Math.min(p.duration, time + 1),
+      actor: sel,
+      paired: false,
+      secondaryActor: p.characters.find((actor) => actor.id !== sel)?.id ?? "",
+      facing: "original",
+      rootMotion: "relative",
+      favorite: false,
+      replaceMotion: true,
+    });
+    setActionNewCategory("");
+  };
+  const openEditAction = (action: Action) => {
+    const range = actionRange ?? selectedActionRange();
+    setActionEditor({
+      id: action.id,
+      name: action.name,
+      description: action.description ?? "",
+      category: action.categories?.[0] ?? "Lifestyle",
+      source: actionRange ? "range" : range ? "selection" : "range",
+      start: range?.start ?? time,
+      end: range?.end ?? Math.min(p.duration, time + action.duration),
+      actor: sel,
+      paired: (action.participants?.filter((item) => item === "actor").length ?? 1) > 1,
+      secondaryActor: p.characters.find((actor) => actor.id !== sel)?.id ?? "",
+      facing: action.facing ?? "original",
+      rootMotion: action.rootMotion ?? "relative",
+      favorite: favorites.includes(action.name),
+      replaceMotion: true,
+    });
+    setActionNewCategory("");
+  };
+  const saveCustomAction = () => {
+    if (!actionEditor) return;
+    const name = actionEditor.name.trim(), category = actionEditor.category.trim();
+    if (!name || !category) return alert("Action name and category are required.");
+    if (allActions.some((action) => action.name.toLowerCase() === name.toLowerCase() && action.id !== actionEditor.id)) return alert("An action with this name already exists.");
+    const existingOverride = p.customActions?.find((action) => action.id === actionEditor.id);
+    const existing = existingOverride ?? actions.find((action) => action.id === actionEditor.id);
+    let keyframes = existing?.keyframes ?? [], participants = existing?.participants ?? ["actor"] as ("actor"|"prop")[];
+    if (actionEditor.replaceMotion || !existing) {
+      const groups = new Map<string, any[]>();
+      if (actionEditor.source === "selection") {
+        timelineSelection.filter((ref) => Boolean(p.tracks[ref.track])).forEach((ref) => {
+          if (ref.track !== actionEditor.actor && (!actionEditor.paired || ref.track !== actionEditor.secondaryActor)) return;
+          const key = p.tracks[ref.track].find((item) => item.id === ref.id);
+          if (key) groups.set(ref.track, [...(groups.get(ref.track) ?? []), key]);
+        });
+      } else {
+        const start = Math.max(0, Math.min(actionEditor.start, actionEditor.end)), end = Math.min(p.duration, Math.max(actionEditor.start, actionEditor.end));
+        if (end <= start) return alert("OUT must be greater than IN.");
+        const actorIds = actionEditor.paired ? [actionEditor.actor, actionEditor.secondaryActor] : [actionEditor.actor];
+        actorIds.filter(Boolean).forEach((actorId) => {
+          const track = p.tracks[actorId] ?? [];
+          groups.set(actorId, [
+            { id: uid(), time: start, pose: poseAt(track, start), easing: "ease-in-out", ...transformAt(track, start) },
+            ...track.filter((key) => key.time > start && key.time < end),
+            { id: uid(), time: end, pose: poseAt(track, end), easing: "ease-in-out", ...transformAt(track, end) },
+          ]);
+        });
+      }
+      if (!groups.size) return alert("Select actor keyframes on the Timeline, or choose a manual time range.");
+      const groupEntries = [...groups.entries()].filter(([, keys]) => keys.length).map(([track, keys]) => [track, [...keys].sort((a,b)=>a.time-b.time)] as const);
+      const baseTime = Math.min(...groupEntries.flatMap(([, keys]) => keys.map((key) => key.time)));
+      keyframes = groupEntries.flatMap(([, keys], actorIndex) => {
+        const root = keys[0].pose.root, rotation = keys[0].rotation ?? 0;
+        return keys.map((key) => {
+          const inlinePose=clonePose(key.pose),shiftX=root.x-key.pose.root.x,shiftY=root.y-key.pose.root.y;
+          Object.values(inlinePose).forEach((joint)=>{joint.x+=shiftX;joint.y+=shiftY;});
+          return ({
+          actorIndex: groupEntries.length > 1 ? actorIndex : undefined,
+          time: key.time - baseTime,
+          pose: "__custom__",
+          inlinePose,
+          easing: key.easing ?? "ease-in-out",
+          dx: actionEditor.rootMotion === "in-place" ? 0 : key.pose.root.x - root.x,
+          dy: actionEditor.rootMotion === "in-place" ? 0 : key.pose.root.y - root.y,
+          rootRotation: (key.rotation ?? rotation) - rotation,
+        });});
+      });
+      participants = Array.from({ length: groupEntries.length }, () => "actor" as const);
+    }
+    const duration = Math.max(.01, ...keyframes.map((key) => key.time));
+    const now = new Date().toISOString();
+    const saved: Action = { id: actionEditor.id ?? `custom_${uid()}`, name, description: actionEditor.description.trim() || undefined, duration, keyframes, categories: [category], tags: [category, name.toLowerCase()], participants, facing: actionEditor.facing, rootMotion: actionEditor.rootMotion, createdAt: existing?.createdAt ?? now, updatedAt: now };
+    update((project) => {
+      project.customActions ??= [];
+      const index = project.customActions.findIndex((action) => action.id === saved.id);
+      if (index >= 0) project.customActions[index] = saved; else project.customActions.push(saved);
+      if (!DEFAULT_ACTION_CATEGORIES.includes(category)) {
+        project.actionCategories ??= [];
+        if (!project.actionCategories.includes(category)) project.actionCategories.push(category);
+      }
+    });
+    if (existing && existing.name !== name) {
+      setFavorites((items) => items.map((item) => item === existing.name ? name : item));
+      setRecent((items) => items.map((item) => item === existing.name ? name : item));
+      setActionLastUsed((items)=>{const next={...items};if(next[existing.name]){next[name]=next[existing.name];delete next[existing.name];}return next;});
+    }
+    setActionCategory(category);
+    setFavorites(items=>actionEditor.favorite?Array.from(new Set([...items,name])):items.filter(item=>item!==name));
+    setActionEditor(null);
+  };
+  const updateAppliedActionFromTimeline = () => {
+    if (!linkedActionContext) return;
+    const existing=allActions.find((action)=>action.id===linkedActionContext.actionId);
+    if(!existing)return alert("The linked Action is no longer available.");
+    const start=Math.max(0,linkedActionContext.start),end=Math.min(p.duration,linkedActionContext.end);
+    if(end<=start)return alert("The linked Action range is no longer valid.");
+    const groups=linkedActionContext.actorIds.map((actorId)=>{
+      const track=p.tracks[actorId]??[],inside=track.filter((key)=>key.time>start&&key.time<end&&(!key.actionInstanceId||key.actionInstanceId===linkedActionContext.instanceId));
+      return [actorId,[
+        {id:uid(),time:start,pose:poseAt(track,start),easing:"ease-in-out" as Ease,...transformAt(track,start)},
+        ...inside,
+        {id:uid(),time:end,pose:poseAt(track,end),easing:"ease-in-out" as Ease,...transformAt(track,end)},
+      ]] as const;
+    });
+    const keyframes=groups.flatMap(([,keys],actorIndex)=>{
+      const ordered=[...keys].sort((a,b)=>a.time-b.time),root=ordered[0].pose.root,rotation=ordered[0].rotation??0;
+      return ordered.map((key)=>{
+        const inlinePose=clonePose(key.pose),shiftX=root.x-key.pose.root.x,shiftY=root.y-key.pose.root.y;
+        Object.values(inlinePose).forEach((joint)=>{joint.x+=shiftX;joint.y+=shiftY;});
+        return {actorIndex:groups.length>1?actorIndex:undefined,time:key.time-start,pose:"__custom__",inlinePose,easing:key.easing??"ease-in-out",dx:existing.rootMotion==="in-place"?0:key.pose.root.x-root.x,dy:existing.rootMotion==="in-place"?0:key.pose.root.y-root.y,rootRotation:(key.rotation??rotation)-rotation};
+      });
+    });
+    const now=new Date().toISOString(),saved:Action={...structuredClone(existing),duration:end-start,keyframes,participants:Array.from({length:groups.length},()=>"actor" as const),updatedAt:now,createdAt:existing.createdAt??now};
+    update((project)=>{
+      project.customActions??=[];const index=project.customActions.findIndex((action)=>action.id===saved.id);if(index>=0)project.customActions[index]=saved;else project.customActions.push(saved);
+      for(const actorId of linkedActionContext.actorIds)for(const key of project.tracks[actorId]??[])if(key.time>=start-.001&&key.time<=end+.001&&(!key.actionInstanceId||key.actionInstanceId===linkedActionContext.instanceId)){key.actionId=saved.id;key.actionInstanceId=linkedActionContext.instanceId;}
+    });
+  };
+  const deleteCustomAction = (action: Action) => {
+    if (!confirm(`Delete “${action.name}”?\n\nThis cannot be undone.`)) return;
+    update((project) => { project.customActions = (project.customActions ?? []).filter((item) => item.id !== action.id); });
+    setFavorites((items) => items.filter((item) => item !== action.name));
+    setRecent((items) => items.filter((item) => item !== action.name));
+    setActionLastUsed((items)=>{const next={...items};delete next[action.name];return next;});
+  };
+  const duplicateCustomAction = (action: Action) => {
+    const base = `${action.name} Copy`;
+    let name = base, suffix = 2;
+    while (allActions.some((item) => item.name.toLowerCase() === name.toLowerCase())) name = `${base} ${suffix++}`;
+    const now = new Date().toISOString();
+    const copy = { ...structuredClone(action), id: `custom_${uid()}`, name, createdAt: now, updatedAt: now };
+    update((project) => { project.customActions ??= []; project.customActions.push(copy); });
+    setActionCategory(copy.categories?.[0] ?? "Lifestyle");
+  };
+  const createActionCategory = (requestedName:string) => {
+    const name = requestedName.trim();
+    if (!name || actionCategories.some((item) => item.toLowerCase() === name.toLowerCase())) return false;
+    update((project) => { const now=new Date().toISOString(); project.actionCategories ??= []; project.actionCategories.push(name); project.actionCategoryMeta ??=[]; project.actionCategoryMeta.push({id:`category_${uid()}`,name,sortOrder:project.actionCategoryMeta.length,isSystem:false,createdAt:now,updatedAt:now}); });
+    setActionCategory(name);
+    return true;
+  };
+  const addActionCategory = () => {
+    const name = prompt("New category name")?.trim();
+    if (name) createActionCategory(name);
+  };
+  const renameActionCategory = () => {
+    if (!p.actionCategories?.includes(actionCategory)) return alert("Built-in categories are protected. Create a custom category to rename or delete it.");
+    const name = prompt("Rename category", actionCategory)?.trim();
+    if (!name || actionCategories.some((item) => item !== actionCategory && item.toLowerCase() === name.toLowerCase())) return;
+    update((project) => {
+      project.actionCategories = (project.actionCategories ?? []).map((item) => item === actionCategory ? name : item);
+      (project.actionCategoryMeta ?? []).forEach((item) => { if(item.name===actionCategory){item.name=name;item.updatedAt=new Date().toISOString();} });
+      (project.customActions ?? []).forEach((action) => { action.categories = action.categories?.map((item) => item === actionCategory ? name : item); });
+    });
+    setActionCategory(name);
+  };
+  const deleteActionCategory = () => {
+    if (!p.actionCategories?.includes(actionCategory)) return alert("Built-in categories are protected.");
+    const count=(p.customActions??[]).filter(action=>action.categories?.includes(actionCategory)).length;
+    const requested=prompt(`Delete category “${actionCategory}”?\n\n${count} Action(s) currently use it. Move them to:`,"Uncategorized")?.trim();
+    if (!requested) return;
+    const destination=requested===actionCategory?"Uncategorized":requested;
+    update((project) => {
+      project.actionCategories = (project.actionCategories ?? []).filter((item) => item !== actionCategory);
+      project.actionCategoryMeta = (project.actionCategoryMeta ?? []).filter((item) => item.name !== actionCategory);
+      if(!DEFAULT_ACTION_CATEGORIES.includes(destination)&&!(project.actionCategories??[]).includes(destination)){project.actionCategories??=[];project.actionCategories.push(destination);const now=new Date().toISOString();project.actionCategoryMeta??=[];project.actionCategoryMeta.push({id:`category_${uid()}`,name:destination,sortOrder:project.actionCategoryMeta.length,isSystem:false,createdAt:now,updatedAt:now});}
+      (project.customActions ?? []).forEach((action) => { if (action.categories?.includes(actionCategory)) action.categories = [destination]; });
+    });
+    setActionCategory(destination);
+  };
+  const moveActionCategory = (delta:number) => {
+    const items=[...(p.actionCategories??[])],index=items.indexOf(actionCategory),target=index+delta;
+    if(index<0||target<0||target>=items.length)return;
+    [items[index],items[target]]=[items[target],items[index]];
+    update(project=>{project.actionCategories=items;project.actionCategoryMeta??=[];project.actionCategoryMeta.forEach(meta=>{meta.sortOrder=items.indexOf(meta.name);meta.updatedAt=new Date().toISOString();});});
+  };
+  const autoMotionContext=()=>{
+    const selectedIds=new Set(timelineSelection.filter(ref=>ref.track===sel).map(ref=>ref.id)),track=p.tracks[sel]??[];
+    const selectedGenerated=track.find(key=>selectedIds.has(key.id)&&key.source==="AUTO_MOTION"&&key.autoMotionGroupId);
+    if(selectedGenerated){const grouped=track.filter(key=>key.autoMotionGroupId===selectedGenerated.autoMotionGroupId),anchorIds=new Set(grouped.flatMap(key=>[key.autoMotionAnchorStartId,key.autoMotionAnchorEndId]).filter(Boolean) as string[]),anchors=track.filter(key=>anchorIds.has(key.id));if(anchors.length>=2)return{start:Math.min(...anchors.map(key=>key.time)),end:Math.max(...anchors.map(key=>key.time)),anchorIds:anchors.map(key=>key.id),groupId:selectedGenerated.autoMotionGroupId};}
+    if(selectedIds.size>=2){const selected=track.filter(key=>selectedIds.has(key.id)&&key.source!=="AUTO_MOTION");if(selected.length>=2)return{start:Math.min(...selected.map(key=>key.time)),end:Math.max(...selected.map(key=>key.time)),anchorIds:selected.map(key=>key.id)};}
+    if(actionRange)return{start:actionRange.start,end:actionRange.end,anchorIds:undefined};
+    return null;
+  };
+  const openAutoMotion=()=>{
+    const context=autoMotionContext();
+    if(!context)return alert("Auto Motion needs at least two Pose keyframes or a Timeline range.");
+    const anchors=authoredAutoMotionAnchors(p.tracks[sel]??[],context.start,context.end,context.anchorIds?new Set(context.anchorIds):undefined);
+    if(anchors.length<2)return alert("Auto Motion needs at least two authored Pose keyframes.");
+    setAutoMotionEditor({actor:sel,...context,easing:"ease-in-out",density:"medium",groupId:context.groupId});
+  };
+  const buildAutoMotion=(source:Project,editor:AutoMotionEditorState)=>{
+    const next=structuredClone(source),track=next.tracks[editor.actor]??[],ids=editor.anchorIds?new Set(editor.anchorIds):undefined,anchors=authoredAutoMotionAnchors(track,editor.start,editor.end,ids);
+    if(anchors.length<2)throw new Error("Auto Motion needs at least two authored Pose keyframes.");
+    for(let index=0;index<anchors.length-1;index++){const a=transformAt(track,anchors[index].time),b=transformAt(track,anchors[index+1].time);if(a.flipH!==b.flipH||a.flipV!==b.flipV)throw new Error("These anchors change facing/orientation. Add an authored transition pose before generating Auto Motion.");}
+    const groupId=editor.groupId??`auto_motion_${uid()}`,clean=clearAutoMotionKeys(track,editor.start,editor.end,editor.groupId),freshAnchors=authoredAutoMotionAnchors(clean,editor.start,editor.end,ids),generated=generateAutoMotionKeys(freshAnchors,editor.easing,editor.density,groupId,uid);
+    next.tracks[editor.actor]=[...clean,...generated].sort((a,b)=>a.time-b.time);return{project:next,count:generated.length,anchors:freshAnchors.length,groupId};
+  };
+  const previewAutoMotion=()=>{if(!autoMotionEditor)return;try{setAutoMotionPreview(buildAutoMotion(p,autoMotionEditor).project);}catch(error){alert(error instanceof Error?error.message:String(error));}};
+  const generateAutoMotion=()=>{if(!autoMotionEditor)return;try{const result=buildAutoMotion(p,autoMotionEditor);replaceProjectKeepingView(result.project);setAutoMotionPreview(null);setAutoMotionEditor(null);}catch(error){alert(error instanceof Error?error.message:String(error));}};
+  const clearGeneratedMotion=()=>{
+    const context=autoMotionContext();if(!context)return alert("Select an Auto Motion range or its anchor keyframes first.");
+    const count=(p.tracks[sel]??[]).filter(key=>key.source==="AUTO_MOTION"&&key.time>=context.start&&key.time<=context.end).length;
+    if(!count)return alert("No eligible generated Auto Motion keyframes are in this selection.");
+    update(project=>{project.tracks[sel]=clearAutoMotionKeys(project.tracks[sel]??[],context.start,context.end,context.groupId);});
   };
   const activateDirectorScene=(id:string,history=true)=>{const apply=(old:Project)=>{if(!old.director||old.director.activeSceneId===id||!old.director.sceneDocuments[id])return old;const director=structuredClone(old.director);director.sceneDocuments[director.activeSceneId]=sceneDoc(old);const restored=restoreSceneDoc(old,director.sceneDocuments[id]);director.activeSceneId=id;restored.director=director;return restored;};if(history){undoStack.current.push(structuredClone(p));redoStack.current=[];}setP(apply);seek(0);};
   const editMasterClip=(clipId:string)=>{const clip=p.master?.clips.find(item=>item.id===clipId);if(!clip)return;setMasterEdit({clipId,host:structuredClone(p)});setMasterPreview(null);setProductionOpen(false);setP({...structuredClone(clip.source),master:structuredClone(p.master)});seek(Math.min(clip.in,clip.source.duration));};
   const commitMasterClip=()=>{if(!masterEdit)return;let next:Project;try{next=commitMasterClipSource(masterEdit.host,masterEdit.clipId,p)}catch{setMasterEdit(null);return;}undoStack.current.push(structuredClone(masterEdit.host));if(undoStack.current.length>80)undoStack.current.shift();redoStack.current=[];setP(next);setMasterEdit(null);setProductionOpen(true);seek(0);};
   const playDirectorSequence=async()=>{const scenes=p.director?.plan.scenes;if(!scenes)return;for(const scene of scenes){activateDirectorScene(scene.id,false);await new Promise(r=>setTimeout(r,50));setTime(0);rt.current=0;setPlaying(true);await new Promise(r=>setTimeout(r,scene.duration*1000));setPlaying(false);} };
   return (
-    <main style={{ gridTemplateRows: `48px minmax(220px, 1fr) 6px ${timelineCollapsed ? 36 : timelineHeight}px` }}>
-      <header>
+    <main className="studio-shell" style={{ gridTemplateRows: `48px 44px minmax(220px, 1fr) 6px ${timelineCollapsed ? 42 : timelineHeight}px` }}>
+      <header className="studio-header">
+        <div className="studio-navigation">
         <b>2D FLIP STUDIO</b>
-        {masterEdit&&<button className="production-button" onClick={commitMasterClip}>↩ RETURN TO MASTER</button>}
-        <button className="create-animation" onClick={()=>setAutoDirectorOpen(true)}>✦ CREATE ANIMATION</button>
-        <button className="fight-director-button" onClick={()=>setFightDirectorOpen(true)}>⚔ FIGHT</button>
-        <button className="cinematic-button" onClick={()=>setCinematicOpen(true)}>◒ CINEMATIC</button>
-        <button className="production-button" onClick={()=>setProductionOpen(true)}>▦ LIBRARY / MASTER</button>
-        <button className="combat-button" onClick={()=>setCombatFxOpen(true)}>✦ COMBAT FX</button>
+        {onExitProject&&<button className="project-exit-button" data-short="← PROJECTS" onClick={onExitProject}>← MY PROJECTS</button>}
+        {masterEdit&&<button className="production-button" data-short="↩ MASTER" onClick={commitMasterClip}>↩ RETURN TO MASTER</button>}
+        <button className="create-animation" data-short="✦ CREATE" onClick={()=>setAutoDirectorOpen(true)}>✦ CREATE ANIMATION</button>
+        <button className="fight-director-button" data-short="⚔ FIGHT" onClick={()=>setFightDirectorOpen(true)}>⚔ FIGHT</button>
+        <button className="cinematic-button" data-short="◒ CINEMA" onClick={()=>setCinematicOpen(true)}>◒ CINEMATIC</button>
+        <button className="production-button" data-short="▦ MASTER" onClick={()=>setProductionOpen(true)}>▦ LIBRARY / MASTER</button>
+        <button className="combat-button" data-short="✦ FX" onClick={()=>setCombatFxOpen(true)}>✦ COMBAT FX</button>
+        </div>
+        <div className="studio-global-tools" aria-label="Project and playback controls">
+        {saveStatus&&<span className={`cloud-save-status ${saveStatus}`} aria-live="polite">{saveStatus==="saving"?"Saving…":saveStatus==="saved"?"Saved ✓":saveStatus==="conflict"?"Save conflict":"Save failed"}</span>}
+        <label className="top-command top-command-secondary tip" data-tip="Import / Apply Timeline Sequence" title="Import / Apply Timeline Sequence" aria-label="Import / Apply Timeline Sequence"><span aria-hidden="true">Sequence</span><input hidden type="file" accept="application/json,.json" onChange={(event)=>{const file=event.target.files?.[0];event.currentTarget.value="";if(!file)return;file.text().then(text=>{try{const sequence=JSON.parse(text) as TimelineSequence,result=applySequence(sequence);alert(`Applied ${result.inserted.length} timeline commands. Undo once removes the sequence.`)}catch(error){alert(error instanceof Error?error.message:String(error))}})}}/></label>
         <button
-          className="top-icon tip"
-          data-tip="Scenario V2 · multi-actor JSON"
-          aria-label="Scenario V2"
+          className="top-command top-command-secondary tip"
+          data-tip="Scenario Editor · multi-actor JSON"
+          title="Scenario Editor · multi-actor JSON"
+          aria-label="Open Scenario Editor"
           onClick={() => setScenarioOpen(true)}
         >
-          ✦
+          <span aria-hidden="true">Scenario</span>
         </button>
         <button
-          className="top-icon tip"
+          className="top-command top-command-secondary tip"
           data-tip="Import body motion from a local video"
+          title="Import body motion from a local video"
           aria-label="Video Motion Capture"
           onClick={() => setMotionCaptureOpen(true)}
         >
-          ◉
+          <span aria-hidden="true">Video Motion</span>
         </button>
         <button
           className="top-icon tip"
           data-tip="Undo · Ctrl+Z"
+          title="Undo · Ctrl+Z"
           aria-label="Undo"
           onClick={undo}
         >
@@ -1260,6 +1676,7 @@ export default function App() {
         <button
           className="top-icon tip"
           data-tip="Redo · Ctrl+Y"
+          title="Redo · Ctrl+Y"
           aria-label="Redo"
           onClick={redo}
         >
@@ -1268,6 +1685,7 @@ export default function App() {
         <button
           className="top-icon tip"
           data-tip="New Project"
+          title="New Project"
           aria-label="New Project"
           onClick={() => setNewProjectOpen(true)}
         >
@@ -1276,6 +1694,7 @@ export default function App() {
         <button
           className="top-icon tip"
           data-tip="Save to project library"
+          title="Save to project library"
           aria-label="Save to Library"
           onClick={saveToLibrary}
         >
@@ -1284,6 +1703,7 @@ export default function App() {
         <button
           className="top-icon tip"
           data-tip="Project Manager"
+          title="Project Manager"
           aria-label="Projects"
           onClick={() => setManagerOpen(true)}
         >
@@ -1293,6 +1713,7 @@ export default function App() {
         <button
           className="top-icon tip"
           data-tip={playing ? "Pause" : "Play"}
+          title={playing ? "Pause playback" : "Play scene"}
           aria-label={playing ? "Pause" : "Play"}
           onClick={() => setPlaying((v) => !v)}
         >
@@ -1301,38 +1722,35 @@ export default function App() {
         <button
           className="top-icon tip"
           data-tip="Stop and rewind"
+          title="Stop and rewind"
           aria-label="Stop"
-          onClick={() => seek(0)}
+          onClick={stopPlayback}
         >
           ■
         </button>
         <button
           className="top-icon tip"
           data-tip="Add keyframe"
+          title="Add keyframe at playhead"
           aria-label="Add Keyframe"
-          onClick={() => addKey()}
+          onClick={() => selectedProp ? addPropKey(selectedProp) : addKey()}
         >
-          ◆＋
+          ◆+
         </button>
         <button
           className="top-icon tip"
           data-tip="Delete keyframe at playhead"
+          title="Delete keyframe at playhead"
           aria-label="Delete Keyframe"
-          onClick={() =>
-            update(
-              (n) =>
-                (n.tracks[sel] = n.tracks[sel].filter(
-                  (k) => Math.abs(k.time - time) > 0.04,
-                )),
-            )
-          }
+          onClick={deleteKeyAtPlayhead}
         >
-          ◆×
+          ◆−
         </button>
         <span className="toolbar-separator" />
         <button
           className="top-icon tip"
           data-tip="Download project JSON"
+          title="Download project JSON"
           aria-label="Save Project"
           onClick={save}
         >
@@ -1341,6 +1759,7 @@ export default function App() {
         <label
           className="button top-icon tip"
           data-tip="Load project JSON"
+          title="Load project JSON"
           aria-label="Load Project"
         >
           ⇧
@@ -1353,6 +1772,7 @@ export default function App() {
         <button
           className="top-icon tip"
           data-tip="Export video"
+          title="Export video"
           aria-label="Export Video"
           onClick={exportVideo}
         >
@@ -1361,6 +1781,7 @@ export default function App() {
         <button
           className="top-icon tip"
           data-tip="Open demo project"
+          title="Open demo project"
           aria-label="Open Demo"
           onClick={() => replaceProject(demoProject())}
         >
@@ -1369,16 +1790,43 @@ export default function App() {
         <button
           className="top-icon tip"
           data-tip="Open guide"
+          title="Open guide"
           aria-label="Guide"
           onClick={() => setHelp(true)}
         >
           ?
         </button>
+        </div>
       </header>
-      {p.director&&<nav className="master-sequence" aria-label="Master sequence"><b>MASTER</b>{p.director.plan.scenes.map((scene,index)=><button key={scene.id} className={p.director?.activeSceneId===scene.id?"active":""} onClick={()=>activateDirectorScene(scene.id)}><span>{index+1}. {scene.title}</span><small>{scene.duration.toFixed(1)}s</small></button>)}<button onClick={()=>{setTime(0);rt.current=0;setPlaying(true)}}>▶ Scene</button><button onClick={playDirectorSequence}>▶ Sequence</button></nav>}
+      <nav className="context-toolbar" aria-label="Editor context toolbar">
+        <div className="scene-tools" aria-label="Character transform tools">
+          <button className={transformMode === "move" && !pathEditing ? "active" : ""} onClick={() => {setTransformMode("move");setRightTool("transform");setInspectorHidden(false);setPathEditing(false)}} title="Select / Move (V)">✥ Move</button>
+          <button className={transformMode === "rotate" && !pathEditing ? "active" : ""} onClick={() => {setTransformMode("rotate");setRightTool("transform");setInspectorHidden(false);setPathEditing(false)}} title="Rotate (R); hold Shift for 15° snap">↻ Rotate</button>
+          <button className={transformMode === "scale" && !pathEditing ? "active" : ""} onClick={() => {setTransformMode("scale");setRightTool("transform");setInspectorHidden(false);setPathEditing(false)}} title="Uniform Scale (S)">⤢ Scale</button>
+          <button onClick={flipHorizontal} title="Flip Horizontal (H)">⇆ Flip</button>
+          <button className={transformMode === "pose" && !pathEditing ? "active" : ""} onClick={() => {setTransformMode("pose");setRightTool("transform");setInspectorHidden(false);setPathEditing(false)}} title="Edit individual joints">Pose Edit</button>
+          <button className={transformMode === "camera" && !pathEditing ? "active" : ""} onClick={() => {setTransformMode("camera");setRightTool("camera");setInspectorHidden(false);setPathEditing(false)}} title="Camera Mode (C)">▣ Camera</button>
+          <button className={cameraPreview ? "active" : ""} onClick={() => setCameraPreview((value) => !value)} title="Preview final camera output">◉ Preview</button>
+        </div>
+        {p.director&&<div className="master-sequence" aria-label="Master sequence">
+          <b>MASTER</b>
+          <label className="master-scene-select" title="Current scene">
+            <span>Scene</span>
+            <select value={p.director.activeSceneId} onChange={event=>activateDirectorScene(event.target.value)}>
+              {p.director.plan.scenes.map((scene,index)=><option key={scene.id} value={scene.id}>{index+1}. {scene.title} · {scene.duration.toFixed(1)}s</option>)}
+            </select>
+          </label>
+          <div className="master-play-mode" aria-label="Playback scope">
+            <span>PLAY</span>
+            <button className={masterPlaybackMode==="scene"?"active":""} onClick={()=>setMasterPlaybackMode("scene")}>Scene</button>
+            <button className={masterPlaybackMode==="sequence"?"active":""} onClick={()=>setMasterPlaybackMode("sequence")}>Sequence</button>
+          </div>
+          <button className="master-play" aria-label={`Play ${masterPlaybackMode}`} title={`Play ${masterPlaybackMode}`} onClick={()=>masterPlaybackMode==="scene"?(setTime(0),rt.current=0,setPlaying(true)):void playDirectorSequence()}>▶</button>
+        </div>}
+      </nav>
       <section
         className={`work ${inspectorHidden ? "inspector-hidden" : ""} ${leftDrawer ? "drawer-open" : ""}`}
-        style={{ gridTemplateColumns: `56px ${leftDrawer ? `${leftWidth}px 6px` : "0px 0px"} minmax(280px, 1fr) ${inspectorHidden ? "0px 0px" : `6px ${rightWidth}px`}` }}
+        style={{ gridTemplateColumns: `72px ${leftDrawer ? `${leftWidth}px 6px` : "0px 0px"} minmax(280px, 1fr) ${inspectorHidden ? "0px 0px" : `6px ${rightWidth}px`} 88px` }}
       >
         <nav className="tool-rail" aria-label="Content browsers">
           <button className={leftDrawer === "scene" ? "active" : ""} data-tip="Scene & Characters" onClick={() => setLeftDrawer((v) => v === "scene" ? null : "scene")}>♙<small>Scene</small></button>
@@ -1387,11 +1835,9 @@ export default function App() {
           <button className={leftDrawer === "scene" ? "" : ""} data-tip="Prop Browser" onClick={() => setLeftDrawer("scene")}>⬡<small>Props</small></button>
           <button className={leftDrawer === "actions" && actionCategory === "Dance" ? "active" : ""} data-tip="Dance Browser" onClick={() => {setActionCategory("Dance"); setLeftDrawer("actions");}}>♫<small>Dance</small></button>
           <span />
-          <button data-tip="Camera Mode" onClick={() => {setTransformMode("camera"); setSelectedProp(null);}}>▣<small>Camera</small></button>
-          <button data-tip="Video Motion Capture" onClick={() => setMotionCaptureOpen(true)}>◉<small>Motion</small></button>
         </nav>
         <aside className="library-drawer">
-          <div className="drawer-heading"><div><small>LIBRARY</small><b>{leftDrawer === "scene" ? "Scene" : "Actions"}</b></div><button onClick={() => setLeftDrawer(null)} title="Close Library">×</button></div>
+          <ToolDrawerHeader eyebrow="LIBRARY" title={leftDrawer === "scene" ? "Scene" : "Actions"} onClose={()=>setLeftDrawer(null)}/>
           <div className={leftDrawer === "scene" ? "drawer-section active" : "drawer-section"}>
           <h3 className="actions-title">Scene</h3>
           <details open className="scene-outliner">
@@ -1466,7 +1912,10 @@ export default function App() {
                 "flower",
                 "gift",
                 "sword",
+                "knife",
                 "staff",
+                "spear",
+                "gun",
                 "shield",
                 "ball",
                 "rectangle",
@@ -1564,22 +2013,13 @@ export default function App() {
             value={actionSearch}
             onChange={(e) => setActionSearch(e.target.value)}
           />
+          <div className="action-library-tools"><button className="primary" onClick={openCreateAction}>＋ Create from Timeline</button></div>
+          <details className="category-management">
+            <summary>Manage Categories</summary>
+            <div><button onClick={addActionCategory}>＋ New Category</button><button onClick={renameActionCategory} disabled={!p.actionCategories?.includes(actionCategory)}>Rename</button><button className="danger" onClick={deleteActionCategory} disabled={!p.actionCategories?.includes(actionCategory)}>Delete</button><button title="Move category up" onClick={()=>moveActionCategory(-1)} disabled={!p.actionCategories?.includes(actionCategory)}>Move Up</button><button title="Move category down" onClick={()=>moveActionCategory(1)} disabled={!p.actionCategories?.includes(actionCategory)}>Move Down</button></div>
+          </details>
           <div className="action-categories">
-            {[
-              "Favorites",
-              "Recent",
-              "Fight",
-              "Lifestyle",
-              "Movement",
-              "Social",
-              "Romance",
-              "Family",
-              "Dance",
-              "Sword / Melee",
-              "Cinematic Action",
-              "Reactions",
-              "Prop Interaction",
-            ].map((cat) => (
+            {["Favorites", "Recent", "All Actions", ...actionCategories].map((cat) => (
               <button
                 key={cat}
                 className={actionCategory === cat ? "on" : ""}
@@ -1829,40 +2269,27 @@ export default function App() {
           )}
           <div className="character-tools">
             <button
-              className="tip"
+              className="character-add-primary tip"
               data-tip="Add Character"
               aria-label="Add Character"
               onClick={() => addActor()}
             >
-              <span>＋👤</span><small>Add</small>
+              <span>＋</span><small>Add Character</small>
             </button>
-            <button
-              className="tip"
-              data-tip="Duplicate selected character"
-              aria-label="Duplicate Character"
-              onClick={duplicateFighter}
-            >
-              <span>⧉</span><small>Duplicate</small>
-            </button>
-            <button
-              className="tip"
-              data-tip="Remove selected fighter"
-              aria-label="Remove selected fighter"
-              onClick={() =>
-                update((n) => {
-                  n.characters = n.characters.filter((c) => c.id !== sel);
-                  delete n.tracks[sel];
-                  setSel(n.characters[0]?.id ?? "");
-                })
-              }
-            >
-              <span>⌫</span><small>Remove</small>
-            </button>
-            <button
-              className="tip"
-              data-tip="Clear animation; keep fighters"
-              aria-label="Clear animation"
-              onClick={() =>
+            <details className="character-actions-menu">
+              <summary aria-label="More character actions" title="More character actions">⋯</summary>
+              <div>
+                <button onClick={duplicateFighter}>⧉ Duplicate selected character</button>
+                <button className="danger" onClick={() => {
+                  const actor=p.characters.find(c=>c.id===sel);if(!actor||!confirm(`Remove “${actor.name}” from this scene?`))return;
+                  update((n) => {
+                    n.characters = n.characters.filter((c) => c.id !== sel);
+                    delete n.tracks[sel];
+                    setSel(n.characters[0]?.id ?? "");
+                  });
+                }}>⌫ Remove selected character</button>
+                <button className="danger" onClick={() => {
+                  if(!confirm("Clear all animation, camera motion and effects? Characters will be kept."))return;
                 update((n) => {
                   n.tracks = Object.fromEntries(
                     n.characters.map((actor) => {
@@ -1889,21 +2316,22 @@ export default function App() {
                   ];
                   n.speed = [{ id: uid(), time: 0, speed: 100 }];
                   n.effects = [];
-                })
-              }
-            >
-              <span>◇</span><small>Clear</small>
-            </button>
+                  });
+                }}>◇ Clear all animation</button>
+              </div>
+            </details>
           </div>
           <div className="action-grid">
-            {actions
+            {allActions
               .filter((a) => {
                 const q = actionSearch.toLowerCase();
                 if (q)
                   return (
                     a.name.toLowerCase().includes(q) ||
-                    a.categories?.some((c) => c.toLowerCase().includes(q))
+                    a.categories?.some((c) => c.toLowerCase().includes(q)) ||
+                    a.tags?.some((tag)=>tag.toLowerCase().includes(q))
                   );
+                if (actionCategory === "All Actions") return true;
                 if (actionCategory === "Favorites")
                   return favorites.includes(a.name);
                 if (actionCategory === "Recent") return recent.includes(a.name);
@@ -1912,15 +2340,16 @@ export default function App() {
                   (actionCategory !== "Dance" || a.style === danceStyle)
                 );
               })
+              .sort((a,b)=>actionCategory==="Recent"?(Date.parse(actionLastUsed[b.name]??"")||0)-(Date.parse(actionLastUsed[a.name]??"")||0):a.name.localeCompare(b.name))
               .map((a) => (
-                <div className="action-item" key={a.name}>
+                <div className="action-item" key={a.id??a.name}>
                   <button
                     className="action-icon tip"
                     data-tip={`${a.name} · ${a.beats ? `${a.beats} beats` : `${a.duration}s`}${a.intensity ? ` · ${a.intensity}` : ""}${a.loopable ? " · Loop" : ""}`}
                     aria-label={a.name}
                     onClick={() => requestAction(a.name)}
                   >
-                    <span>{actionGlyph[a.name] ?? "◆"}</span>
+                    <ActionPreview action={a}/>
                     <small>{a.name}</small>
                   </button>
                   {a.categories?.includes("Dance") && (
@@ -1946,6 +2375,7 @@ export default function App() {
                   >
                     ★
                   </button>
+                  <div className="custom-action-tools"><button title="Update this Action from the Timeline" aria-label={`Edit ${a.name}`} onClick={() => openEditAction(a)}>✎</button><button title="Duplicate action" onClick={()=>duplicateCustomAction(a)}>⧉</button>{a.id?.startsWith("custom_")&&<button title="Delete custom action" onClick={() => deleteCustomAction(a)}>⌫</button>}</div>
                 </div>
               ))}
           </div>
@@ -1978,19 +2408,18 @@ export default function App() {
           }}
         />
         <div className="stage">
-          {inspectorHidden && (
-            <button className="restore-inspector" onClick={() => setInspectorHidden(false)} title="Show Inspector">◀ Inspector</button>
-          )}
           {masterPreview?<MasterPreviewCanvas project={masterPreview.project} time={masterPreview.time} format={masterPreview.format}/>:<CanvasView
-            project={p}
+            project={pathPreviewProject??autoMotionPreview??p}
             time={time}
             selected={sel}
             selectedProp={selectedProp}
+            selectedEffect={selectedEffect}
             mode={transformMode}
             groundLock={groundLock}
             onSelect={(id, additive) => {
               setSel(id);
               setSelectedProp(null);
+              setSelectedEffect(null);
               setSelectedActors((old) =>
                 additive
                   ? old.includes(id)
@@ -1999,10 +2428,12 @@ export default function App() {
                   : [id],
               );
             }}
-            onSelectProp={setSelectedProp}
+            onSelectProp={(id) => { setSelectedProp(id); if (id) setSelectedEffect(null); }}
+            onSelectEffect={(id) => { setSelectedEffect(id); if (id) {setSelectedProp(null);setRightTool("effects");setInspectorHidden(false);} }}
             onPoseChange={livePoseChange}
             onTransformChange={liveTransformChange}
             onPropTransformChange={livePropTransform}
+            onEffectChange={(id, values) => update((n) => { const effect=n.effects.find((item)=>item.id===id); if(effect) Object.assign(effect,values); })}
             onGestureStart={beginCanvasGesture}
             onGestureEnd={endCanvasGesture}
             onCameraChange={liveCameraChange}
@@ -2011,60 +2442,24 @@ export default function App() {
             previewCamera={cameraPreview}
             safeArea={cameraSafeArea}
             reviewJoints={p.motionReviews?.find(issue=>issue.id===activeMotionIssue)?.joints}
+            workspaceZoom={workspaceZoom}
+            activePath={(p.pathVisibility??"selected")==="hidden"?null:activePath}
+            guidePaths={(p.pathVisibility??"selected")==="all"?(p.motionPaths??[]):[]}
+            onPathChange={changePathLive}
+            pathEditing={pathEditing}
           />}
-          <div
-            className="transform-toolbar"
-            aria-label="Character transform tools"
-          >
-            <button
-              className={transformMode === "move" ? "active" : ""}
-              onClick={() => setTransformMode("move")}
-              title="Select / Move (V)"
-            >
-              ✥ Move
-            </button>
-            <button
-              className={transformMode === "rotate" ? "active" : ""}
-              onClick={() => setTransformMode("rotate")}
-              title="Rotate (R); hold Shift for 15° snap"
-            >
-              ↻ Rotate
-            </button>
-            <button
-              className={transformMode === "scale" ? "active" : ""}
-              onClick={() => setTransformMode("scale")}
-              title="Uniform Scale (S)"
-            >
-              ⤢ Scale
-            </button>
-            <button onClick={flipHorizontal} title="Flip Horizontal (H)">
-              ⇆ Flip
-            </button>
-            <button
-              className={transformMode === "pose" ? "active" : ""}
-              onClick={() => setTransformMode("pose")}
-              title="Edit individual joints"
-            >
-              Pose Edit
-            </button>
-            <button
-              className={transformMode === "camera" ? "active" : ""}
-              onClick={() => setTransformMode("camera")}
-              title="Camera Mode (C)"
-            >
-              ▣ Camera
-            </button>
-            <button
-              className={cameraPreview ? "active" : ""}
-              onClick={() => setCameraPreview((value) => !value)}
-              title="Preview final camera output"
-            >
-              ◉ Preview
-            </button>
-          </div>
+          {!masterPreview && !cameraPreview && (
+            <div className="workspace-zoom" aria-label="Workspace zoom">
+              <button onClick={() => setWorkspaceZoom((value) => Math.max(1, +(value - 0.25).toFixed(2)))} disabled={workspaceZoom <= 1} title="Zoom out workspace">−</button>
+              <input aria-label="Workspace zoom" type="range" min="1" max="4" step="0.25" value={workspaceZoom} onChange={(event) => setWorkspaceZoom(+event.target.value)} />
+              <button onClick={() => setWorkspaceZoom((value) => Math.min(4, +(value + 0.25).toFixed(2)))} disabled={workspaceZoom >= 4} title="Zoom in workspace">＋</button>
+              <button className="workspace-zoom-value" onClick={() => setWorkspaceZoom(1)} title="Reset workspace zoom">{Math.round(workspaceZoom * 100)}%</button>
+            </div>
+          )}
           <div className="time">
             {time.toFixed(2)}s · {Math.round(time * p.fps)}f
           </div>
+          {pathEditing&&activePath&&<div className="path-edit-indicator">✎ Editing {activePath.name} · Finish in Path drawer</div>}
           {canvasEditing && (
             <div className="transform-feedback">
               {transformMode === "rotate"
@@ -2170,16 +2565,52 @@ export default function App() {
             addEventListener("pointermove", move); addEventListener("pointerup", up);
           }}
         />
-        <aside className={`props inspector-${selectedProp ? "prop" : transformMode === "camera" ? "camera" : "character"}`}>
-          <button className="hide-inspector" onClick={() => setInspectorHidden(true)} title="Hide Inspector">×</button>
-          <div className="inspector-heading"><small>INSPECTOR</small><b>{selectedProp ? "Prop" : transformMode === "camera" ? "Camera" : p.characters.find((c) => c.id === sel)?.name ?? "Scene"}</b></div>
+        <aside className={`props tool-drawer right-tool-${rightTool} inspector-${selectedEffect ? "effect" : selectedProp ? "prop" : transformMode === "camera" ? "camera" : "character"}`}>
+          <ToolDrawerHeader
+            eyebrow=""
+            title={{transform:"Transform",path:"Path",camera:"Camera",effects:"Effects",timing:"Timing",background:"Background"}[rightTool]}
+            subtitle={rightTool==="transform"
+              ? (selectedProp?p.props?.find(x=>x.id===selectedProp)?.name:p.characters.find(c=>c.id===sel)?.name)
+              : rightTool==="path"
+                ? `Motion path for ${p.characters.find(c=>c.id===(activePath?.targetId??sel))?.name??p.props?.find(x=>x.id===activePath?.targetId)?.name??"selection"}`
+                : rightTool==="camera"?"Scene Camera"
+                : rightTool==="effects"?"Scene Effects"
+                : rightTool==="timing"?"Scene Settings"
+                : "Scene Appearance"}
+            onClose={()=>setInspectorHidden(true)}
+          />
+          {selectedEffect && (() => {
+            const effect=p.effects.find((item)=>item.id===selectedEffect);
+            if(!effect)return null;
+            const change=(values:Partial<typeof effect>)=>update((n)=>{const target=n.effects.find((item)=>item.id===effect.id);if(target)Object.assign(target,values)});
+            const params=effectParamsAt(effect,time),setKey=(values:Parameters<typeof upsertEffectKey>[2])=>update((n)=>{const target=n.effects.find((item)=>item.id===effect.id);if(target)upsertEffectKey(target,time,values)}),
+              keys=[...(effect.animationKeys??[])].sort((a,b)=>a.time-b.time);
+            return <details open className="effect-object-inspector">
+              <summary>✦ {effect.preset ?? effect.type}</summary>
+              <small className="format-readout">AUTO-KEY ON · Slider changes are saved at {time.toFixed(2)}s and interpolated between keys.</small>
+              <div className="grid">
+                <label>X<input type="number" value={Math.round(effect.x)} onChange={(e)=>change({x:+e.target.value})}/></label>
+                <label>Y<input type="number" value={Math.round(effect.y)} onChange={(e)=>change({y:+e.target.value})}/></label>
+              </div>
+              <label>Radius / Size · {Math.round(params.scale*100)}%<input type="range" min="5" max="400" value={Math.round(params.scale*100)} onChange={(e)=>setKey({scale:+e.target.value/100})}/></label>
+              <label>Arc · {Math.round(params.arc)}°<input type="range" min="10" max="360" value={Math.round(params.arc)} onChange={(e)=>setKey({arc:+e.target.value})}/></label>
+              <label>Directional Spread · {Math.round(params.spread)}°<input type="range" min="5" max="360" value={Math.round(params.spread)} onChange={(e)=>setKey({spread:+e.target.value})}/></label>
+              <label>Scatter Radius · {Math.round(params.scatterRadius)}<input type="range" min="0" max="200" value={Math.round(params.scatterRadius)} onChange={(e)=>setKey({scatterRadius:+e.target.value})}/></label>
+              <label>Density · {Math.round(params.density)}<input type="range" min="1" max="48" value={Math.round(params.density)} onChange={(e)=>setKey({density:+e.target.value})}/></label>
+              <label>Range · {Math.round(params.range)}%<input type="range" min="10" max="400" value={Math.round(params.range)} onChange={(e)=>setKey({range:+e.target.value})}/></label>
+              <label>Opacity · {Math.round(params.opacity)}%<input type="range" min="0" max="100" value={Math.round(params.opacity)} onChange={(e)=>setKey({opacity:+e.target.value})}/></label>
+              <div className="fx-key-controls"><button onClick={()=>setKey({})}>◆ Set Key at {time.toFixed(2)}s</button>{keys.map(key=><button key={key.id} className={Math.abs(key.time-time)<.02?"active":""} onClick={()=>seek(key.time)}>{key.time.toFixed(2)}s · {Math.round(key.scale*100)}%</button>)}</div>
+              <label>Attachment<select value={effect.targetFighter??""} onChange={(e)=>change({targetFighter:e.target.value||undefined})}><option value="">Independent world object</option>{p.characters.map((actor)=><option key={actor.id} value={actor.id}>Attach to {actor.name}</option>)}</select></label>
+              <button className="danger" onClick={()=>{update((n)=>{n.effects=n.effects.filter((item)=>item.id!==effect.id)});setSelectedEffect(null)}}>Delete FX Object</button>
+            </details>;
+          })()}
           {selectedProp &&
             (() => {
               const prop = p.props?.find((x) => x.id === selectedProp),
                 tf = propTransformAt(p.propTracks?.[selectedProp], time);
               if (!prop) return null;
               return (
-                <details open>
+                <details open className="prop-transform-details">
                   <summary>{prop.name} · Prop</summary>
                   <div className="grid">
                     <label>
@@ -2249,7 +2680,7 @@ export default function App() {
                     >
                       <option value="">None</option>
                       {p.characters.map((a) => (
-                        <option value={a.id}>{a.name}</option>
+                        <option key={a.id} value={a.id}>{a.name}</option>
                       ))}
                     </select>
                   </label>
@@ -2277,7 +2708,7 @@ export default function App() {
                             "rightAnkle",
                             "leftAnkle",
                           ].map((j) => (
-                            <option value={j}>{j}</option>
+                            <option key={j} value={j}>{j}</option>
                           ))}
                         </select>
                       </label>
@@ -2346,6 +2777,7 @@ export default function App() {
                     />
                   </label>
                   <div className="grid">
+                    <button onClick={()=>addPropKey(prop.id)}>◆ Add Keyframe</button>
                     <button
                       onClick={() =>
                         updatePropTransform(prop.id, { flipH: !tf.flipH })
@@ -2412,81 +2844,14 @@ export default function App() {
                 </details>
               );
             })()}
-          <details open className="character-details">
-            <summary>
-              {p.characters.find((c) => c.id === sel)?.name ||
-                `Fighter ${sel.toUpperCase()}`}
-            </summary>
-            <div className="format-readout">
-              Canvas: {p.format?.label ?? "9:16"} · {p.format?.width ?? 1080}×
-              {p.format?.height ?? 1920}
-            </div>
-            <label>
-              Easing
-              <select
-                value={ease}
-                onChange={(e) => setEase(e.target.value as Ease)}
-              >
-                {[
-                  "linear",
-                  "ease-in",
-                  "ease-out",
-                  "ease-in-out",
-                  "snap",
-                  "hold",
-                ].map((x) => (
-                  <option>{x}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              FPS
-              <select
-                value={p.fps}
-                onChange={(e) => update((n) => (n.fps = +e.target.value))}
-              >
-                {[6, 12, 24, 30, 60].map((x) => (
-                  <option>{x}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Duration
-              <input
-                className="duration-input"
-                type="number"
-                min="1"
-                max="300"
-                step="1"
-                value={p.duration}
-                onChange={(e) =>
-                  update(
-                    (n) =>
-                      (n.duration = Math.max(
-                        1,
-                        Math.min(300, +e.target.value || 1),
-                      )),
-                  )
-                }
-              />
-            </label>
-            <label>
-              Trails
-              <select
-                value={p.trail}
-                onChange={(e) =>
-                  update((n) => (n.trail = +e.target.value as any))
-                }
-              >
-                <option value="0">Off</option>
-                <option value="1">Low</option>
-                <option value="2">Medium</option>
-                <option value="3">High</option>
-              </select>
-            </label>
-          </details>
-          <details open className="character-details">
+          <details open className="character-transform-details character-details">
             <summary>Character Transform</summary>
+            <label>
+              Keyframe Easing
+              <select value={ease} onChange={(e) => setEase(e.target.value as Ease)}>
+                {["linear","ease-in","ease-out","ease-in-out","snap","hold"].map((x) => <option key={x}>{x}</option>)}
+              </select>
+            </label>
             <div className="transform-values">
               <label>
                 Rotation °
@@ -2597,7 +2962,7 @@ export default function App() {
               <button onClick={() => addKey(current)}>Add Keyframe</button>
             </div>
           </details>
-          <details className="character-details">
+          <details className="pose-workflow-details character-details">
             <summary>Pose</summary>
             <button
               className="open-pose-browser"
@@ -2611,7 +2976,7 @@ export default function App() {
             <select onChange={(e) => applyBuiltInPose(e.target.value)}>
               <option>Load built-in…</option>
               {Object.keys(poses).map((x) => (
-                <option>{x}</option>
+                <option key={x}>{x}</option>
               ))}
             </select>
             <div className="grid">
@@ -2631,7 +2996,7 @@ export default function App() {
               Save Pose
             </button>
           </details>
-          <details open={transformMode === "camera"} className="camera-details">
+          <details open className="camera-details">
             <summary>Camera</summary>
             <button
               className={transformMode === "camera" ? "active" : ""}
@@ -2732,7 +3097,8 @@ export default function App() {
               </button>
             </div>
           </details>
-          <details>
+          <PathPanel project={p} selectedPath={selectedPath} targetId={selectedProp??sel} targetType={selectedProp?"prop":"character"} playhead={time} onSelect={id=>{setSelectedPath(id);setPathPreview(false);setPathEditing(false);setRightTool("path")}} onNew={newPath} onChange={changePath} onDuplicate={duplicatePath} onDelete={deletePath} onPreview={togglePathPreview} onBake={bakePath} previewing={pathPreview} editing={pathEditing} onEditingChange={setPathEditing} onVisibilityChange={value=>update(n=>{n.pathVisibility=value})}/>
+          <details open className="effects-details">
             <summary>Effects</summary>
             <select
               defaultValue=""
@@ -2782,7 +3148,7 @@ export default function App() {
                   >
                     <button
                       className="effect-jump"
-                      onClick={() => seek(effect.time)}
+                      onClick={() => { seek(effect.time); setSelectedEffect(effect.id); setSelectedProp(null); setRightTool("effects"); setInspectorHidden(false); }}
                       title="Go to effect time"
                     >
                       <span>{effect.type}</span>
@@ -2808,9 +3174,30 @@ export default function App() {
               )}
             </div>
           </details>
-          <details>
-            <summary>Speed</summary>
+          <details open className="timing-details">
+            <summary>Scene Timing</summary>
+            <div className="format-readout">
+              Canvas: {p.format?.label ?? "9:16"} · {p.format?.width ?? 1080}×{p.format?.height ?? 1920}
+            </div>
             <label>
+              FPS
+              <select value={p.fps} onChange={(e) => update((n) => (n.fps = +e.target.value))}>
+                {[6, 12, 24, 30, 60].map((x) => <option key={x}>{x}</option>)}
+              </select>
+            </label>
+            <label>
+              Duration
+              <input className="duration-input" type="number" min="1" max="300" step="0.1" value={Number(p.duration.toFixed(3))}
+                onChange={(e) => update((n) => (n.duration = Math.round(Math.max(1,Math.min(300,+e.target.value || 1))*1000)/1000))}/>
+            </label>
+            <label>
+              Trails · Preview display
+              <select value={p.trail} onChange={(e) => update((n) => (n.trail = +e.target.value as any))}>
+                <option value="0">Off</option><option value="1">Low</option><option value="2">Medium</option><option value="3">High</option>
+              </select>
+            </label>
+            <label>
+              Playback Speed at Playhead
               <input
                 type="range"
                 min="10"
@@ -2830,7 +3217,7 @@ export default function App() {
               10–400%
             </label>
           </details>
-          <details>
+          <details open className="background-details">
             <summary>Background</summary>
             <label>
               Top{" "}
@@ -2861,6 +3248,14 @@ export default function App() {
             </button>
           </details>
         </aside>
+        <nav className="tool-rail right-tool-rail" aria-label="Authoring tools">
+          <button className={!inspectorHidden&&rightTool==="transform"?"active":""} data-tip="Transform Inspector" onClick={()=>{if(!inspectorHidden&&rightTool==="transform")setInspectorHidden(true);else{setRightTool("transform");setInspectorHidden(false)}}}>✥<small>Transform</small></button>
+          <button className={!inspectorHidden&&rightTool==="path"?"active":""} data-tip="Motion Path" onClick={()=>{if(!inspectorHidden&&rightTool==="path")setInspectorHidden(true);else{setRightTool("path");setInspectorHidden(false)}}}>〰<small>Path</small></button>
+          <button className={!inspectorHidden&&rightTool==="camera"?"active":""} data-tip="Camera Inspector" onClick={()=>{if(!inspectorHidden&&rightTool==="camera")setInspectorHidden(true);else{setRightTool("camera");setTransformMode("camera");setInspectorHidden(false)}}}>▣<small>Camera</small></button>
+          <button className={!inspectorHidden&&rightTool==="effects"?"active":""} data-tip="Scene Effects" onClick={()=>{if(!inspectorHidden&&rightTool==="effects")setInspectorHidden(true);else{setRightTool("effects");setInspectorHidden(false)}}}>✦<small>Effects</small></button>
+          <button className={!inspectorHidden&&rightTool==="timing"?"active":""} data-tip="Timing & Playback" onClick={()=>{if(!inspectorHidden&&rightTool==="timing")setInspectorHidden(true);else{setRightTool("timing");setInspectorHidden(false)}}}>◷<small>Timing</small></button>
+          <button className={!inspectorHidden&&rightTool==="background"?"active":""} data-tip="Scene Background" onClick={()=>{if(!inspectorHidden&&rightTool==="background")setInspectorHidden(true);else{setRightTool("background");setInspectorHidden(false)}}}>▧<small>Background</small></button>
+        </nav>
       </section>
       <div
         className="timeline-resizer"
@@ -2882,14 +3277,60 @@ export default function App() {
         time={time}
         setTime={seek}
         selected={sel}
+        playing={playing}
+        onTogglePlayback={()=>setPlaying(value=>!value)}
+        onStopPlayback={stopPlayback}
+        activeActionName={linkedActionContext?.name}
+        onUpdateAction={updateAppliedActionFromTimeline}
         selectedKeys={timelineSelection}
         onSelectionChange={selectTimelineKeys}
         onMoveKeys={moveTimelineKeys}
+        snapMode={timelineSnap}
+        onSnapMode={setTimelineSnap}
+        onDuplicate={()=>duplicateTimelineKeys(false)}
+        onDuplicateAtPlayhead={()=>duplicateTimelineKeys(true)}
+        onCopy={copyTimelineKeys}
+        onPaste={()=>pasteTimelineKeys(time)}
+        onDelete={deleteTimelineKeys}
+        onEditPose={()=>{const ref=timelineSelection.find(item=>Boolean(p.tracks[item.track])),key=ref&&timelineTrack(p,ref.track).find(item=>item.id===ref.id);if(ref&&key){setSel(ref.track);setSelectedActors([ref.track]);setSelectedProp(null);setTransformMode("pose");setPathEditing(false);seek(key.time)}}}
+        duplicateOffset={duplicateOffset}
+        onDuplicateOffset={setDuplicateOffset}
+        selectedPath={selectedPath}
+        onSelectPath={id=>{setSelectedPath(id);setPathEditing(false);setPathPreview(false);setRightTool("path");setInspectorHidden(false)}}
+        onRetimePath={retimePath}
+        range={actionRange}
+        onRangeChange={(range)=>{setActionRange(range);if(range&&actionEditor?.source==="range")setActionEditor(old=>old&&({...old,start:range.start,end:range.end}));}}
+        onCreateAction={openCreateAction}
+        onAutoMotion={openAutoMotion}
+        onClearAutoMotion={clearGeneratedMotion}
         collapsed={timelineCollapsed}
         onToggleCollapsed={() => setTimelineCollapsed((value) => !value)}
         onIssue={(id)=>{const issue=p.motionReviews?.find(x=>x.id===id);if(!issue)return;setActiveMotionIssue(id);setSel(issue.actorId);setSelectedActors([issue.actorId]);setTransformMode("pose");seek(issue.time);}}
       />
       {activeMotionIssue&&(()=>{const issues=(p.motionReviews??[]).filter(issue=>issue.status==="review"),index=issues.findIndex(issue=>issue.id===activeMotionIssue),issue=p.motionReviews?.find(issue=>issue.id===activeMotionIssue);if(!issue)return null;const go=(next:number)=>{const target=issues[(next+issues.length)%issues.length];if(!target)return;setActiveMotionIssue(target.id);setSel(target.actorId);setSelectedActors([target.actorId]);setTransformMode("pose");seek(target.time);};const limb=issue.joints.some(j=>j.includes("left"))?"Left ":issue.joints.some(j=>j.includes("right"))?"Right ":"";const part=issue.joints.some(j=>/Wrist|Elbow|Shoulder/.test(j))?"Arm":issue.joints.some(j=>/Ankle|Knee|Hip/.test(j))?"Leg":issue.joints.join(", ");return <div className="motion-review-bar"><button onClick={()=>go(index-1)}>‹ Previous Issue</button><div><b>{(issue.sourceTime??issue.time).toFixed(2)}s · {limb}{part}</b><span>{issue.status==="review"?"Manual Review Required":"Reconstructed"}</span><small>Issue {Math.max(1,index+1)} of {issues.length}</small></div><button onClick={()=>{update(n=>{const found=n.motionReviews?.find(x=>x.id===issue.id);if(found)found.status="resolved";});setActiveMotionIssue(null);}}>Mark Resolved</button><button onClick={()=>go(index+1)}>Next Issue ›</button><button onClick={()=>setActiveMotionIssue(null)}>×</button></div>;})()}
+      {actionEditor && (
+        <div className="help-backdrop" onClick={() => setActionEditor(null)}>
+          <article className="action-editor" onClick={(event) => event.stopPropagation()}>
+            <header><div><small>ACTION LIBRARY</small><h2>{actionEditor.id ? "Update Action" : "Create Action"}</h2></div><button onClick={() => setActionEditor(null)}>×</button></header>
+            <label>Action Name<input autoFocus value={actionEditor.name} onChange={(event) => setActionEditor((old) => old && ({...old,name:event.target.value}))} placeholder="My custom action" /></label>
+            <label>Description<textarea value={actionEditor.description} onChange={(event)=>setActionEditor(old=>old&&({...old,description:event.target.value}))} placeholder="Optional notes about this motion"/></label>
+            <div className="action-category-field">
+              <label>{actionEditor.id ? "Category / Move Action To" : "Category"}<select value={actionEditor.category} onChange={(event) => setActionEditor((old) => old && ({...old,category:event.target.value}))}>{actionCategories.map((category) => <option key={category}>{category}</option>)}</select></label>
+              <div className="action-category-create"><input value={actionNewCategory} onChange={event=>setActionNewCategory(event.target.value)} onKeyDown={event=>{if(event.key==="Enter"){event.preventDefault();const name=actionNewCategory.trim();if(createActionCategory(name)){setActionEditor(old=>old&&({...old,category:name}));setActionNewCategory("");}}}} placeholder="New category name"/><button disabled={!actionNewCategory.trim()} onClick={()=>{const name=actionNewCategory.trim();if(createActionCategory(name)){setActionEditor(old=>old&&({...old,category:name}));setActionNewCategory("");}}}>＋ Add Category</button></div>
+              <small>{actionEditor.id ? "Choosing another category moves this Action when you save." : "Create and select a category without leaving this dialog."}</small>
+            </div>
+            <label className="action-editor-check"><input type="checkbox" checked={actionEditor.favorite} onChange={event=>setActionEditor(old=>old&&({...old,favorite:event.target.checked}))}/> Favorite</label>
+            <div className="action-editor-grid"><label>Primary Actor<select value={actionEditor.actor} onChange={event=>setActionEditor(old=>old&&({...old,actor:event.target.value}))}>{p.characters.map(actor=><option key={actor.id} value={actor.id}>{actor.name}</option>)}</select></label><label className="action-editor-check"><input type="checkbox" checked={actionEditor.paired} onChange={event=>setActionEditor(old=>old&&({...old,paired:event.target.checked}))}/> Paired Action</label>{actionEditor.paired&&<label>Secondary Actor<select value={actionEditor.secondaryActor} onChange={event=>setActionEditor(old=>old&&({...old,secondaryActor:event.target.value}))}>{p.characters.filter(actor=>actor.id!==actionEditor.actor).map(actor=><option key={actor.id} value={actor.id}>{actor.name}</option>)}</select></label>}<label>Facing<select value={actionEditor.facing} onChange={event=>setActionEditor(old=>old&&({...old,facing:event.target.value as ActionEditorState["facing"]}))}><option value="original">Original</option><option value="left">Left</option><option value="right">Right</option></select></label><label>Root Motion<select value={actionEditor.rootMotion} onChange={event=>setActionEditor(old=>old&&({...old,rootMotion:event.target.value as ActionEditorState["rootMotion"]}))}><option value="relative">Preserve / Relative</option><option value="in-place">In Place</option></select></label></div>
+            {actionEditor.id && <label className="action-editor-check"><input type="checkbox" checked={actionEditor.replaceMotion} onChange={(event) => setActionEditor((old) => old && ({...old,replaceMotion:event.target.checked}))}/> Replace motion with current Timeline capture</label>}
+            {(!actionEditor.id || actionEditor.replaceMotion) && <>
+              <div className="action-source-tabs"><button className={actionEditor.source === "selection" ? "active" : ""} onClick={() => setActionEditor((old) => old && ({...old,source:"selection"}))}>Selected Keyframes</button><button className={actionEditor.source === "range" ? "active" : ""} onClick={() => setActionEditor((old) => old && ({...old,source:"range"}))}>Manual Range</button></div>
+              {actionEditor.source === "selection" ? <div className="action-capture-summary"><b>{timelineSelection.filter((ref) => ref.track===actionEditor.actor||(actionEditor.paired&&ref.track===actionEditor.secondaryActor)).length} intended actor keyframes selected</b><span>Box-select keyframes on the Timeline. Unrelated actors are excluded.</span></div> : <div className="action-range"><label>IN (seconds)<input type="number" min="0" max={p.duration} step=".001" value={actionEditor.start} onChange={(event) => {const start=+event.target.value;setActionEditor((old) => old && ({...old,start}));setActionRange(old=>({start,end:old?.end??actionEditor.end}));}}/></label><label>OUT (seconds)<input type="number" min="0" max={p.duration} step=".001" value={actionEditor.end} onChange={(event) => {const end=+event.target.value;setActionEditor((old) => old && ({...old,end}));setActionRange(old=>({start:old?.start??actionEditor.start,end}));}}/></label><b>Duration {Math.max(0,actionEditor.end-actionEditor.start).toFixed(3)}s</b><small>Captures only the selected actor(s) and samples exact boundary poses.</small></div>}
+            </>}
+            <footer><button onClick={() => setActionEditor(null)}>Cancel</button><button className="primary" onClick={saveCustomAction}>{actionEditor.id ? "Update Action" : "Create Action"}</button></footer>
+          </article>
+        </div>
+      )}
+      {autoMotionEditor&&(()=>{const track=p.tracks[autoMotionEditor.actor]??[],anchors=authoredAutoMotionAnchors(track,autoMotionEditor.start,autoMotionEditor.end,autoMotionEditor.anchorIds?new Set(autoMotionEditor.anchorIds):undefined),generated=track.filter(key=>key.source==="AUTO_MOTION"&&key.time>=autoMotionEditor.start&&key.time<=autoMotionEditor.end).length,modified=track.filter(key=>key.source==="AUTO_MOTION_MODIFIED"&&key.time>=autoMotionEditor.start&&key.time<=autoMotionEditor.end).length;return <div className="help-backdrop" onClick={()=>{setAutoMotionEditor(null);setAutoMotionPreview(null)}}><article className="action-editor auto-motion-editor" onClick={event=>event.stopPropagation()}><header><div><small>POSE-TO-POSE GENERATOR</small><h2>✨ Auto Motion</h2></div><button onClick={()=>{setAutoMotionEditor(null);setAutoMotionPreview(null)}}>×</button></header><div className="auto-motion-summary"><span>Actor <b>{p.characters.find(actor=>actor.id===autoMotionEditor.actor)?.name}</b></span><span>Range <b>{autoMotionEditor.start.toFixed(3)}s → {autoMotionEditor.end.toFixed(3)}s</b></span><span>Authored Poses <b>{anchors.length}</b></span>{generated>0&&<span>Generated <b>{generated}</b></span>}</div><label>Timing / Easing<select value={autoMotionEditor.easing} onChange={event=>{setAutoMotionPreview(null);setAutoMotionEditor(old=>old&&({...old,easing:event.target.value as AutoMotionTiming}))}}><option value="linear">Linear</option><option value="ease-in">Ease In</option><option value="ease-out">Ease Out</option><option value="ease-in-out">Ease In-Out</option></select></label><label>Density<select value={autoMotionEditor.density} onChange={event=>{setAutoMotionPreview(null);setAutoMotionEditor(old=>old&&({...old,density:event.target.value as AutoMotionDensity}))}}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>{modified>0&&<p className="auto-motion-warning">{modified} manually edited generated frame(s) are protected. Clear and Regenerate will preserve them as authored anchors.</p>}<footer><button onClick={()=>{setAutoMotionEditor(null);setAutoMotionPreview(null)}}>Cancel</button><button onClick={previewAutoMotion}>{autoMotionPreview?"Refresh Preview":"Preview"}</button>{generated>0&&<button onClick={generateAutoMotion}>Regenerate</button>}<button className="primary" onClick={generateAutoMotion}>Generate</button></footer></article></div>})()}
       {newProjectOpen && (
         <div className="help-backdrop" onClick={() => setNewProjectOpen(false)}>
           <article
@@ -3020,7 +3461,7 @@ export default function App() {
                   }
                 >
                   {p.characters.map((actor) => (
-                    <option value={actor.id}>{actor.name}</option>
+                    <option key={actor.id} value={actor.id}>{actor.name}</option>
                   ))}
                 </select>
               </label>
@@ -3038,12 +3479,20 @@ export default function App() {
           </article>
         </div>
       )}
+      {characterSelectOpen && (
+        <CharacterSelect
+          onClose={() => setCharacterSelectOpen(false)}
+          onAdd={addCharacterAssetToScene}
+        />
+      )}
       {poseBrowserOpen && (
         <PoseBrowser
           fighter={sel}
           actors={p.characters}
           danceOnly={dancePoseMode}
           initialStyle={danceStyle}
+          orientation={poseOrientation}
+          onOrientation={setPoseOrientation}
           onFighter={setSel}
           onApply={(id) => applyBuiltInPose(id, sel)}
           onAdd={(id) => applyBuiltInPose(id, sel, true)}
@@ -3088,7 +3537,7 @@ export default function App() {
                     <b>{name}</b>
                     <span>
                       {project.format?.label ?? "9:16"} · {project.duration}s ·{" "}
-                      {project.characters.length} fighters
+                      {project.characters.length} characters
                     </span>
                   </button>
                   <button
@@ -3135,7 +3584,7 @@ export default function App() {
       {fightDirectorOpen&&<Suspense fallback={<div className="fight-backdrop"/>}><FightDirectorPanel project={p} playhead={time} onClose={()=>setFightDirectorOpen(false)} onApply={project=>replaceProject(project)}/></Suspense>}
       {cinematicOpen&&<Suspense fallback={<div className="cinematic-backdrop"/>}><CinematicPanel project={p} time={time} onClose={()=>setCinematicOpen(false)} onApply={project=>replaceProject(project)}/></Suspense>}
       {productionOpen&&<Suspense fallback={<div className="production-backdrop"/>}><ProductionLibraryPanel project={p} time={time} onClose={()=>{setMasterPreview(null);setProductionOpen(false)}} onApply={project=>{setMasterPreview(null);replaceProject(project)}} onPreview={(project,sourceTime,masterTime)=>setMasterPreview({project,time:sourceTime,masterTime,format:p.master?.format??project.format})} onEditClip={editMasterClip}/></Suspense>}
-      {combatFxOpen&&<Suspense fallback={<div className="combat-backdrop"/>}><CombatFxPanel project={p} actor={sel} time={time} onClose={()=>setCombatFxOpen(false)} onApply={project=>replaceProject(project)}/></Suspense>}
+      {combatFxOpen&&<Suspense fallback={<div className="combat-backdrop"/>}><CombatFxPanel project={p} actor={sel} time={time} onClose={()=>setCombatFxOpen(false)} onApply={replaceProjectKeepingView} onSeek={seek}/></Suspense>}
       {activeMotionIssue&&motionReviewSource&&(()=>{const issue=p.motionReviews?.find(x=>x.id===activeMotionIssue);return issue?<MotionIssueReference source={motionReviewSource} time={issue.sourceTime??issue.time} onClose={()=>setMotionReviewSource(null)}/>:null;})()}
       {help && (
         <div className="help-backdrop" onClick={() => setHelp(false)}>
@@ -3155,8 +3604,8 @@ export default function App() {
                 می‌شوند.
               </li>
               <li>
-                <b>+ Fighter A</b> را بزن. اگر مبارز دوم لازم داری{" "}
-                <b>+ Fighter B</b> را هم بزن.
+                <b>+ Character</b> را بزن. اگر کاراکتر دوم لازم داری همین
+                دکمه را دوباره بزن.
               </li>
               <li>از دکمه‌های A و B کاراکتر فعال را انتخاب کن.</li>
               <li>
@@ -3177,7 +3626,7 @@ export default function App() {
                 از Action Library یک حرکت مثل Dash Forward یا Straight Punch
                 بزن؛ کل Keyframeهای آن حرکت اضافه می‌شوند.
               </li>
-              <li>برای Fighter B همین مراحل را جداگانه انجام بده.</li>
+              <li>برای کاراکتر دوم همین مراحل را جداگانه انجام بده.</li>
               <li>
                 Keyframeهای لوزی‌شکل Timeline را با ماوس به چپ و راست بکش تا
                 زمان‌بندی اصلاح شود.

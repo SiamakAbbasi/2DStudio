@@ -25,9 +25,11 @@ export const joints: JointName[] = [
   "leftHip",
   "leftKnee",
   "leftAnkle",
+  "leftToe",
   "rightHip",
   "rightKnee",
   "rightAnkle",
+  "rightToe",
 ];
 export const bones: [JointName, JointName][] = [
   ["root", "torso"],
@@ -44,8 +46,10 @@ export const bones: [JointName, JointName][] = [
   ["leftHip", "rightHip"],
   ["leftHip", "leftKnee"],
   ["leftKnee", "leftAnkle"],
+  ["leftAnkle", "leftToe"],
   ["rightHip", "rightKnee"],
   ["rightKnee", "rightAnkle"],
+  ["rightAnkle", "rightToe"],
 ];
 export const clonePose = (p: Pose): Pose => JSON.parse(JSON.stringify(p));
 export function basePose(x = 360, y = 720, flip = false): Pose {
@@ -65,9 +69,11 @@ export function basePose(x = 360, y = 720, flip = false): Pose {
     leftHip: p(-18, -5),
     leftKnee: p(-34, 90),
     leftAnkle: p(-55, 190),
+    leftToe: p(-73, 192),
     rightHip: p(18, -5),
     rightKnee: p(38, 90),
     rightAnkle: p(62, 190),
+    rightToe: p(80, 192),
   };
 }
 export function propTransformAt(
@@ -121,25 +127,43 @@ function shaped(t: number, e: Ease) {
       : 0.12 + 0.88 * (1 - Math.pow(1 - (t - 0.55) / 0.45, 4));
   return t;
 }
+const connectedPose = (source: Pose) => {
+    const pose=clonePose(source),facingSignal=(pose.head.x-pose.root.x)+(pose.torso.x-pose.root.x)*.8+(((pose.leftWrist.x+pose.rightWrist.x)/2)-pose.root.x)*.35,directional=Math.abs(facingSignal)>8,facing=facingSignal<0?-1:1,
+      foot=(side:"left"|"right",force=false)=>{const ankle=pose[`${side}Ankle`],knee=pose[`${side}Knee`],toe=pose[`${side}Toe`],toeLength=toe?Math.hypot(toe.x-ankle.x,toe.y-ankle.y):Infinity;if(force||!toe||toeLength>20){const dx=ankle.x-knee.x,dy=ankle.y-knee.y,length=Math.max(1,Math.hypot(dx,dy)),sign=directional?facing:(side==="left"?-1:1);pose[`${side}Toe`]={x:ankle.x+sign*Math.abs(dy)/length*20,y:ankle.y-sign*dx/length*20}}};
+    const legacyOpposed=pose.leftToe&&pose.rightToe&&(pose.leftToe.x-pose.leftAnkle.x)*(pose.rightToe.x-pose.rightAnkle.x)<0;
+    foot("left",!!legacyOpposed&&directional);foot("right",!!legacyOpposed&&directional);
+    const spineX=pose.neck.x-pose.torso.x,spineY=pose.neck.y-pose.torso.y,
+      spineLength=Math.hypot(spineX,spineY),spineMax=76;
+    if(spineLength>spineMax){
+      const oldX=pose.neck.x,oldY=pose.neck.y;
+      pose.neck.x=pose.torso.x+spineX*spineMax/spineLength;
+      pose.neck.y=pose.torso.y+spineY*spineMax/spineLength;
+      pose.head.x+=pose.neck.x-oldX;pose.head.y+=pose.neck.y-oldY;
+    }
+    const headX=pose.head.x-pose.neck.x,headY=pose.head.y-pose.neck.y,
+      headLength=Math.hypot(headX,headY),headMax=48;
+    if(headLength>headMax){pose.head.x=pose.neck.x+headX*headMax/headLength;pose.head.y=pose.neck.y+headY*headMax/headLength;}
+    return pose;
+};
 export function poseAt(track: PoseKeyframe[] = [], time: number): Pose {
-  if (!track.length) return basePose();
+  if (!track.length) return connectedPose(basePose());
   const a = [...track].sort((x, y) => x.time - y.time);
-  if (time <= a[0].time) return clonePose(a[0].pose);
-  if (time >= a.at(-1)!.time) return clonePose(a.at(-1)!.pose);
+  if (time <= a[0].time) return connectedPose(a[0].pose);
+  if (time >= a.at(-1)!.time) return connectedPose(a.at(-1)!.pose);
   let i = 0;
   while (a[i + 1].time < time) i++;
   const p = a[i],
-    n = a[i + 1],
+    n = a[i + 1],pp=connectedPose(p.pose),np=connectedPose(n.pose),
     t = shaped((time - p.time) / (n.time - p.time), p.easing);
   const out = {} as Pose;
   joints.forEach(
     (j) =>
       (out[j] = {
-        x: p.pose[j].x + (n.pose[j].x - p.pose[j].x) * t,
-        y: p.pose[j].y + (n.pose[j].y - p.pose[j].y) * t,
+        x: pp[j].x + (np[j].x - pp[j].x) * t,
+        y: pp[j].y + (np[j].y - pp[j].y) * t,
       }),
   );
-  return out;
+  return connectedPose(out);
 }
 export function transformAt(
   track: PoseKeyframe[] = [],

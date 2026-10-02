@@ -4,6 +4,8 @@ import {
   exportAction,
   importAction,
   insertAction,
+  assetToLibraryAction,
+  libraryActionToAsset,
   loadActionAssets,
   saveActionAssets,
   type ActionAsset,
@@ -35,7 +37,10 @@ export function ProductionLibraryPanel({
   onEditClip,
 }: Props) {
   const [tab, setTab] = useState<"actions" | "master">("actions"),
-    [assets, setAssets] = useState(loadActionAssets);
+    [assets, setAssets] = useState<ActionAsset[]>(() => {
+      const merged=[...(project.customActions??[]).map(libraryActionToAsset),...loadActionAssets()];
+      return merged.filter((asset,index)=>merged.findIndex(item=>item.id===asset.id||item.name===asset.name)===index);
+    });
   const [start, setStart] = useState(Math.max(0, time - 1)),
     [end, setEnd] = useState(Math.min(project.duration, time + 1)),
     [name, setName] = useState("My Action");
@@ -57,6 +62,7 @@ export function ProductionLibraryPanel({
   const store = (next: ActionAsset[]) => {
     setAssets(next);
     saveActionAssets(next);
+    onApply({...structuredClone(project),customActions:next.map(assetToLibraryAction)});
   };
   const save = () =>
     store([

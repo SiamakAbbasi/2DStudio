@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { joints, poseAt, transformAt } from "./animation";
 import { drawScene } from "./CanvasView";
-import { buildFight, type FightMoveDefinition, type FightSettings } from "./fightDirector";
+import { applyFightMoveSequence, type FightMoveDefinition, type FightSettings } from "./fightDirector";
 import { blankProject } from "./project";
 import type { Project } from "./types";
 
@@ -26,12 +26,10 @@ const subscribe = (callback: FrameCallback) => {
 
 function previewProject(move: FightMoveDefinition, settings: FightSettings) {
   const base = blankProject({ label: "Preview", width: 720, height: 420 });
-  // Fight Director reserves ending time internally. Keep enough compilation
-  // room for long/special moves while the visible loop still uses metadata.
-  base.duration = Math.max(3, move.duration + 1.8);
+  base.duration = Math.max(3, move.duration + .4);
   base.trail = 0;
   const combatType = move.tags.includes("sword") ? "SWORD" : "UNARMED";
-  return buildFight(base, "a", "b", 0, {
+  return applyFightMoveSequence(base, "a", move.participants===2?"b":undefined, 0, {
     ...settings,
     duration: base.duration,
     combatType,

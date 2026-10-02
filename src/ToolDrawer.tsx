@@ -1,0 +1,2 @@
+import type {ReactNode} from "react";
+export function ToolDrawerHeader({eyebrow="TOOL",title,subtitle,onClose}: {eyebrow?:string;title:string;subtitle?:ReactNode;onClose:()=>void}){return <header className="tool-drawer-heading"><div>{eyebrow&&<small>{eyebrow}</small>}<b>{title}</b>{subtitle&&<span>{subtitle}</span>}</div><button onClick={onClose} aria-label={`Close ${title}`} title={`Close ${title}`}>×</button></header>}

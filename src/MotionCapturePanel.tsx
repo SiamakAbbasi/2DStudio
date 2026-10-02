@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { analyzeVideo, retargetMotion, type MotionFrame } from "./motionCapture";
 import { cleanupMotion, type MotionCleanupResult } from "./motionCleanup";
 import { poseAt } from "./animation";
+import { drawStick } from "./CanvasView";
 import type { Ease, MotionReviewIssue, Pose, PoseKeyframe, Project } from "./types";
 
-function TargetPreview({pose}:{pose:Pose|null}){if(!pose)return <div className="motion-target-empty">Analyze to preview target</div>;const values=Object.values(pose),minX=Math.min(...values.map(p=>p.x)),maxX=Math.max(...values.map(p=>p.x)),minY=Math.min(...values.map(p=>p.y)),maxY=Math.max(...values.map(p=>p.y)),x=(v:number)=>20+(v-minX)/Math.max(1,maxX-minX)*160,y=(v:number)=>20+(v-minY)/Math.max(1,maxY-minY)*220,pairs=[["head","neck"],["neck","torso"],["torso","root"],["neck","leftShoulder"],["leftShoulder","leftElbow"],["leftElbow","leftWrist"],["neck","rightShoulder"],["rightShoulder","rightElbow"],["rightElbow","rightWrist"],["root","leftHip"],["leftHip","leftKnee"],["leftKnee","leftAnkle"],["root","rightHip"],["rightHip","rightKnee"],["rightKnee","rightAnkle"]] as const;return <svg viewBox="0 0 200 260" aria-label="Target character motion preview">{pairs.map(([a,b])=><line key={a+b} x1={x(pose[a].x)} y1={y(pose[a].y)} x2={x(pose[b].x)} y2={y(pose[b].y)}/>)}</svg>}
+function TargetPreview({pose}:{pose:Pose|null}){const ref=useRef<HTMLCanvasElement>(null);useEffect(()=>{const canvas=ref.current;if(!canvas||!pose)return;const ctx=canvas.getContext("2d")!,values=Object.values(pose),minX=Math.min(...values.map(p=>p.x))-45,maxX=Math.max(...values.map(p=>p.x))+45,minY=Math.min(...values.map(p=>p.y))-45,maxY=Math.max(...values.map(p=>p.y))+45,scale=Math.min(180/(maxX-minX),240/(maxY-minY)),offsetX=100-(minX+maxX)*scale/2,offsetY=130-(minY+maxY)*scale/2;ctx.clearRect(0,0,200,260);ctx.save();ctx.translate(offsetX,offsetY);ctx.scale(scale,scale);drawStick(ctx,pose,"#52aaff",1,false);ctx.restore()},[pose]);if(!pose)return <div className="motion-target-empty">Analyze to preview target</div>;return <canvas ref={ref} width="200" height="260" aria-label="Target character motion preview"/>}
 
 export function MotionCapture({ project, playhead, selected, easing, onClose, onImport }: {
   project: Project; playhead: number; selected: string; easing: Ease;

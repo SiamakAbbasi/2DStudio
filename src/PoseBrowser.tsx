@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { bones } from "./animation";
-import { poseCatalog, type PoseEntry } from "./poses";
+import { drawStick } from "./CanvasView";
+import { orientedPose, poseCatalog, poseOrientations, type PoseEntry, type PoseOrientation } from "./poses";
 import { danceStyles } from "./danceData";
 const Thumb = memo(function Thumb({
   entry,
@@ -32,18 +32,7 @@ const Thumb = memo(function Thumb({
     ctx.save();
     ctx.translate(ox, oy);
     ctx.scale(s, s);
-    ctx.strokeStyle = "#55aaff";
-    ctx.lineCap = "round";
-    ctx.lineWidth = 10;
-    bones.forEach(([a, b]) => {
-      ctx.beginPath();
-      ctx.moveTo(p[a].x, p[a].y);
-      ctx.lineTo(p[b].x, p[b].y);
-      ctx.stroke();
-    });
-    ctx.beginPath();
-    ctx.arc(p.head.x, p.head.y, 35, 0, 7);
-    ctx.stroke();
+    drawStick(ctx,p,"#55aaff",1,false);
     ctx.restore();
   }, [entry]);
   return (
@@ -68,6 +57,8 @@ export function PoseBrowser({
   onAdd,
   onPreview,
   onClose,
+  orientation,
+  onOrientation,
   danceOnly = false,
   initialStyle = "Techno",
 }: {
@@ -78,6 +69,8 @@ export function PoseBrowser({
   onAdd: (id: string) => void;
   onPreview: (id: string | null) => void;
   onClose: () => void;
+  orientation:PoseOrientation;
+  onOrientation:(orientation:PoseOrientation)=>void;
   danceOnly?: boolean;
   initialStyle?: string;
 }) {
@@ -146,6 +139,10 @@ export function PoseBrowser({
               </button>
             ))}
           </div>
+          <div className="pose-orientation" aria-label="Pose orientation">
+            <b>Orientation</b>
+            {poseOrientations.map(item=><button key={item} className={orientation===item?"active":""} onClick={()=>onOrientation(item)}>{item==="FRONT"?"Front":item==="THREE_QUARTER_LEFT"?"3/4 L":item==="SIDE_LEFT"?"Side L":item==="THREE_QUARTER_RIGHT"?"3/4 R":"Side R"}</button>)}
+          </div>
           <input
             autoFocus
             placeholder="Search pose: kick, stance, block…"
@@ -162,7 +159,7 @@ export function PoseBrowser({
                 {items.map((entry) => (
                   <Thumb
                     key={entry.id}
-                    entry={entry}
+                    entry={{...entry,pose:orientedPose(entry.pose,orientation),name:`${entry.name} — ${orientation==="FRONT"?"Front":orientation.replace("THREE_QUARTER","3/4").replace("_"," ")}`}}
                     selected={selected === entry.id}
                     onSelect={setSelected}
                     onApply={(id) => finish(id)}

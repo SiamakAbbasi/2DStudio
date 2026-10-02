@@ -1,0 +1,10 @@
+{
+  "duration": 4,
+  "commands": [
+    {"timeMs": 0, "type": "POSE", "actor": "Actor A", "name": "Combat Stance", "orientation": "SIDE_RIGHT"},
+    {"timeMs": 500, "type": "ACTION", "actor": "Actor A", "name": "Step Forward"},
+    {"timeMs": 1000, "type": "FIGHT_MOVE", "attacker": "Actor A", "name": "Jab", "execution": "ATTACKER_ONLY"},
+    {"timeMs": 1500, "type": "FIGHT_MOVE", "attacker": "Actor A", "name": "Hook", "execution": "ATTACKER_ONLY"},
+    {"timeMs": 2200, "type": "FIGHT_MOVE", "attacker": "Actor A", "name": "Roundhouse", "execution": "ATTACKER_ONLY"}
+  ]
+}

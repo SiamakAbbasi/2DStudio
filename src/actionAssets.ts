@@ -1,6 +1,7 @@
 import { poseAt, uid } from "./animation";
 import type {
   CameraKeyframe,
+  Action,
   Effect,
   Pose,
   PoseKeyframe,
@@ -8,6 +9,7 @@ import type {
   Prop,
   PropKeyframe,
 } from "./types";
+import { poses } from "./poses";
 export interface ActionParticipant {
   role: string;
   keys: PoseKeyframe[];
@@ -197,4 +199,25 @@ export function importAction(text: string) {
   if (x.format !== "2d-flip-action" || !x.asset?.participants)
     throw new Error("Invalid .flipaction file");
   return x.asset as ActionAsset;
+}
+
+/** Compatibility bridge: the Action panel and Production Library share the same records. */
+export function assetToLibraryAction(asset: ActionAsset): Action {
+  const keyframes=asset.participants.flatMap((participant,actorIndex)=>{
+    const first=participant.keys[0]?.pose.root??{x:0,y:0};
+    return participant.keys.map(key=>{
+      const inlinePose=structuredClone(key.pose),dx=key.pose.root.x-first.x,dy=key.pose.root.y-first.y;
+      Object.values(inlinePose).forEach(joint=>{joint.x-=dx;joint.y-=dy;});
+      return {actorIndex:asset.participants.length>1?actorIndex:undefined,time:key.time,pose:"__custom__",inlinePose,easing:key.easing,dx,dy};
+    });
+  });
+  return {id:asset.id.startsWith("custom_")?asset.id:`custom_${asset.id}`,name:asset.name,description:asset.tags.join(", "),categories:[asset.category],tags:asset.tags,duration:asset.duration,keyframes,participants:asset.participants.map(()=>"actor" as const),rootMotion:asset.rootMotionMode==="remove"?"in-place":"relative",facing:asset.facing==="auto"?"original":asset.facing,createdAt:asset.createdAt,updatedAt:asset.updatedAt};
+}
+export function libraryActionToAsset(action: Action): ActionAsset {
+  const count=Math.max(1,action.participants?.filter(item=>item==="actor").length??1),now=new Date().toISOString();
+  const participants=Array.from({length:count},(_,actorIndex)=>{
+    const relevant=action.keyframes.filter(key=>key.actorIndex===undefined||key.actorIndex===actorIndex);
+    return {role:actorIndex===0?"actor":`target_${actorIndex}`,origin:{x:0,y:0},facing:false,keys:relevant.map(key=>{const pose=structuredClone(key.inlinePose??poses[key.pose]??poses.idle);Object.values(pose).forEach(joint=>{joint.x+=key.dx??0;joint.y+=key.dy??0;});return{id:uid(),time:key.time,pose,easing:key.easing};})};
+  });
+  return {id:action.id??uid(),name:action.name,category:action.categories?.[0]??"Uncategorized",tags:action.tags??[],duration:action.duration,actorCount:count,participants,rootMotionMode:action.rootMotion==="in-place"?"remove":"preserve",facing:action.facing==="original"||!action.facing?"auto":action.facing,camera:undefined,effects:undefined,sourceMetadata:{type:"manual"},createdAt:action.createdAt??now,updatedAt:action.updatedAt??now};
 }

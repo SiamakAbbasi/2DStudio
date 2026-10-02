@@ -3,6 +3,13 @@ import type { JointName, Pose, V } from "./types";
 import { dancePoseEntries } from "./danceData";
 
 type Edit = Partial<Record<JointName, V>>;
+const finishPose=(p:Pose)=>{
+  p.root={x:(p.leftHip.x+p.rightHip.x)/2,y:(p.leftHip.y+p.rightHip.y)/2};
+  const facingSignal=(p.head.x-p.root.x)+(p.torso.x-p.root.x)*.8+(((p.leftWrist.x+p.rightWrist.x)/2)-p.root.x)*.35,
+    directional=Math.abs(facingSignal)>8,facing=facingSignal<0?-1:1;
+  const foot=(side:"left"|"right")=>{const ankle=p[`${side}Ankle`],knee=p[`${side}Knee`],dx=ankle.x-knee.x,dy=ankle.y-knee.y,length=Math.max(1,Math.hypot(dx,dy)),sign=directional?facing:(side==="left"?-1:1);p[`${side}Toe`]={x:ankle.x+sign*Math.abs(dy)/length*20,y:ankle.y-sign*dx/length*20}};
+  foot("left");foot("right");return p;
+};
 export type PoseCategory =
   | "Guard"
   | "Stance"
@@ -31,11 +38,7 @@ const make = (edit: Edit = {}, shift = { x: 0, y: 0 }) => {
     p[j as JointName].y += shift.y;
   }
   for (const [j, v] of Object.entries(edit)) p[j as JointName] = { ...v! };
-  p.root = {
-    x: (p.leftHip.x + p.rightHip.x) / 2,
-    y: (p.leftHip.y + p.rightHip.y) / 2,
-  };
-  return p;
+  return finishPose(p);
 };
 const from = (src: Pose, edit: Edit = {}, dx = 0, dy = 0) => {
   const p = clonePose(src);
@@ -44,28 +47,28 @@ const from = (src: Pose, edit: Edit = {}, dx = 0, dy = 0) => {
     p[j as JointName].y += dy;
   }
   for (const [j, v] of Object.entries(edit)) p[j as JointName] = { ...v! };
-  p.root = {
-    x: (p.leftHip.x + p.rightHip.x) / 2,
-    y: (p.leftHip.y + p.rightHip.y) / 2,
-  };
-  return p;
+  return finishPose(p);
 };
 const guard = make({
-  torso: { x: 370, y: 625 },
-  neck: { x: 377, y: 565 },
-  head: { x: 380, y: 525 },
-  leftShoulder: { x: 350, y: 570 },
-  leftElbow: { x: 325, y: 610 },
-  leftWrist: { x: 365, y: 555 },
-  rightShoulder: { x: 405, y: 570 },
-  rightElbow: { x: 430, y: 610 },
-  rightWrist: { x: 400, y: 535 },
-  leftHip: { x: 338, y: 715 },
-  rightHip: { x: 382, y: 715 },
-  leftKnee: { x: 310, y: 805 },
-  leftAnkle: { x: 275, y: 900 },
-  rightKnee: { x: 425, y: 800 },
-  rightAnkle: { x: 455, y: 895 },
+  // Canonical three-quarter combat stance facing right. The lead (left)
+  // shoulder, hand, hip, and foot project toward the opponent while the rear
+  // side overlaps the silhouette. Existing mirroring supplies the left-facing
+  // version without a second pose system.
+  torso: { x: 380, y: 632 },
+  neck: { x: 390, y: 568 },
+  head: { x: 405, y: 525 },
+  leftShoulder: { x: 397, y: 576 },
+  leftElbow: { x: 425, y: 603 },
+  leftWrist: { x: 466, y: 562 },
+  rightShoulder: { x: 361, y: 590 },
+  rightElbow: { x: 364, y: 620 },
+  rightWrist: { x: 397, y: 548 },
+  leftHip: { x: 387, y: 720 },
+  rightHip: { x: 350, y: 736 },
+  leftKnee: { x: 418, y: 806 },
+  leftAnkle: { x: 462, y: 900 },
+  rightKnee: { x: 335, y: 810 },
+  rightAnkle: { x: 306, y: 880 },
 });
 const crouch = make({
   torso: { x: 360, y: 700 },
@@ -221,6 +224,7 @@ const add = (category: PoseCategory, items: Record<string, Pose>) =>
   );
 add("Guard", {
   neutral_stand: basePose(),
+  combat_stance: guard,
   idle_relaxed: make({
     leftElbow: { x: 330, y: 650 },
     leftWrist: { x: 325, y: 710 },
@@ -398,6 +402,13 @@ add("Movement", {
     leftAnkle: { x: 230, y: 900 },
   }),
   run_stop: crouch,
+  sprint_flight: from(guard, {
+    root:{x:380,y:720},torso:{x:455,y:635},neck:{x:495,y:590},head:{x:530,y:565},
+    leftShoulder:{x:445,y:610},leftElbow:{x:355,y:585},leftWrist:{x:270,y:575},
+    rightShoulder:{x:460,y:625},rightElbow:{x:365,y:625},rightWrist:{x:285,y:640},
+    leftHip:{x:360,y:725},leftKnee:{x:270,y:770},leftAnkle:{x:165,y:825},
+    rightHip:{x:400,y:715},rightKnee:{x:465,y:755},rightAnkle:{x:390,y:805},
+  }),
   turn_anticipation: from(guard, { torso: { x: 330, y: 625 } }),
   turn_mid: from(guard, {
     leftWrist: { x: 440, y: 560 },
@@ -697,6 +708,26 @@ add("Reaction", {
   ),
 });
 add("Ground", {
+  front_compressed_shadow_landing: make({
+    // Front-camera foreshortening: the pelvis, spine and neck converge behind
+    // the head. The head is rendered last, so the waist disappears naturally
+    // while both legs remain readable on the left and right.
+    head: { x: 360, y: 650 },
+    neck: { x: 360, y: 662 },
+    torso: { x: 360, y: 678 },
+    leftShoulder: { x: 333, y: 673 },
+    rightShoulder: { x: 387, y: 673 },
+    leftElbow: { x: 305, y: 728 },
+    rightElbow: { x: 415, y: 728 },
+    leftWrist: { x: 274, y: 795 },
+    rightWrist: { x: 446, y: 795 },
+    leftHip: { x: 344, y: 684 },
+    rightHip: { x: 376, y: 684 },
+    leftKnee: { x: 292, y: 760 },
+    rightKnee: { x: 428, y: 760 },
+    leftAnkle: { x: 230, y: 842 },
+    rightAnkle: { x: 490, y: 842 },
+  }),
   knockback_land: crouch,
   fall_forward_start: from(guard, {
     torso: { x: 450, y: 690 },
@@ -865,6 +896,58 @@ export const poses: Record<string, Pose> = Object.fromEntries(
   entries.map((e) => [e.id, e.pose]),
 );
 Object.assign(poses, {
+  walk_contact_a: from(poses.neutral_stand,{torso:{x:374,y:628},neck:{x:378,y:564},head:{x:381,y:520},leftShoulder:{x:349,y:573},leftElbow:{x:397,y:617},leftWrist:{x:429,y:662},rightShoulder:{x:400,y:576},rightElbow:{x:357,y:623},rightWrist:{x:324,y:671},leftHip:{x:350,y:716},rightHip:{x:400,y:720},leftKnee:{x:314,y:806},leftAnkle:{x:270,y:900},rightKnee:{x:438,y:813},rightAnkle:{x:478,y:900}}),
+  walk_down_a: from(poses.neutral_stand,{torso:{x:376,y:642},neck:{x:380,y:578},head:{x:383,y:534},leftWrist:{x:420,y:664},rightWrist:{x:330,y:674},leftHip:{x:352,y:730},rightHip:{x:402,y:732},leftKnee:{x:326,y:822},leftAnkle:{x:292,y:900},rightKnee:{x:438,y:824},rightAnkle:{x:468,y:900}}),
+  walk_passing_a: from(poses.neutral_stand,{torso:{x:380,y:630},neck:{x:384,y:566},head:{x:388,y:522},leftElbow:{x:414,y:614},leftWrist:{x:446,y:654},rightElbow:{x:350,y:620},rightWrist:{x:319,y:666},leftHip:{x:356,y:718},rightHip:{x:406,y:720},leftKnee:{x:383,y:789},leftAnkle:{x:410,y:858},rightKnee:{x:427,y:812},rightAnkle:{x:454,y:900}}),
+  walk_up_a: from(poses.neutral_stand,{torso:{x:382,y:618},neck:{x:386,y:554},head:{x:390,y:510},leftWrist:{x:442,y:650},rightWrist:{x:322,y:660},leftHip:{x:358,y:706},rightHip:{x:408,y:710},leftKnee:{x:401,y:779},leftAnkle:{x:438,y:866},rightKnee:{x:430,y:802},rightAnkle:{x:456,y:900}}),
+  walk_contact_b: from(poses.neutral_stand,{torso:{x:378,y:628},neck:{x:382,y:564},head:{x:385,y:520},leftShoulder:{x:353,y:576},leftElbow:{x:319,y:623},leftWrist:{x:286,y:671},rightShoulder:{x:404,y:573},rightElbow:{x:452,y:617},rightWrist:{x:484,y:662},leftHip:{x:354,y:720},rightHip:{x:404,y:716},leftKnee:{x:442,y:813},leftAnkle:{x:482,y:900},rightKnee:{x:318,y:806},rightAnkle:{x:274,y:900}}),
+  walk_down_b: from(poses.neutral_stand,{torso:{x:380,y:642},neck:{x:384,y:578},head:{x:387,y:534},leftWrist:{x:334,y:674},rightWrist:{x:424,y:664},leftHip:{x:356,y:732},rightHip:{x:406,y:730},leftKnee:{x:442,y:824},leftAnkle:{x:472,y:900},rightKnee:{x:330,y:822},rightAnkle:{x:296,y:900}}),
+  walk_passing_b: from(poses.neutral_stand,{torso:{x:384,y:630},neck:{x:388,y:566},head:{x:392,y:522},leftElbow:{x:354,y:620},leftWrist:{x:323,y:666},rightElbow:{x:418,y:614},rightWrist:{x:450,y:654},leftHip:{x:360,y:720},rightHip:{x:410,y:718},leftKnee:{x:431,y:812},leftAnkle:{x:458,y:900},rightKnee:{x:387,y:789},rightAnkle:{x:414,y:858}}),
+  walk_up_b: from(poses.neutral_stand,{torso:{x:386,y:618},neck:{x:390,y:554},head:{x:394,y:510},leftWrist:{x:326,y:660},rightWrist:{x:446,y:650},leftHip:{x:362,y:710},rightHip:{x:412,y:706},leftKnee:{x:434,y:802},leftAnkle:{x:460,y:900},rightKnee:{x:405,y:779},rightAnkle:{x:442,y:866}}),
+  run_contact_a: from(guard,{torso:{x:412,y:627},neck:{x:434,y:567},head:{x:448,y:526},leftElbow:{x:365,y:610},leftWrist:{x:326,y:654},rightElbow:{x:454,y:560},rightWrist:{x:491,y:521},leftHip:{x:378,y:716},rightHip:{x:431,y:706},leftKnee:{x:320,y:797},leftAnkle:{x:257,y:883},rightKnee:{x:489,y:791},rightAnkle:{x:552,y:894}}),
+  run_contact_b: from(guard,{torso:{x:412,y:627},neck:{x:434,y:567},head:{x:448,y:526},leftElbow:{x:454,y:560},leftWrist:{x:491,y:521},rightElbow:{x:365,y:610},rightWrist:{x:326,y:654},leftHip:{x:431,y:706},rightHip:{x:378,y:716},leftKnee:{x:489,y:791},leftAnkle:{x:552,y:894},rightKnee:{x:320,y:797},rightAnkle:{x:257,y:883}}),
+  run_compress_a: from(crouch,{torso:{x:405,y:660},neck:{x:428,y:602},head:{x:443,y:563},leftWrist:{x:326,y:677},rightWrist:{x:482,y:572},leftHip:{x:375,y:744},rightHip:{x:429,y:735},leftKnee:{x:332,y:821},leftAnkle:{x:296,y:900},rightKnee:{x:472,y:810},rightAnkle:{x:510,y:900}}),
+  run_compress_b: from(crouch,{torso:{x:405,y:660},neck:{x:428,y:602},head:{x:443,y:563},leftWrist:{x:482,y:572},rightWrist:{x:326,y:677},leftHip:{x:429,y:735},rightHip:{x:375,y:744},leftKnee:{x:472,y:810},leftAnkle:{x:510,y:900},rightKnee:{x:332,y:821},rightAnkle:{x:296,y:900}}),
+  run_compress: from(crouch,{torso:{x:405,y:660},neck:{x:428,y:602},head:{x:443,y:563},leftWrist:{x:326,y:677},rightWrist:{x:482,y:572},leftHip:{x:375,y:744},rightHip:{x:429,y:735},leftKnee:{x:332,y:821},leftAnkle:{x:296,y:900},rightKnee:{x:472,y:810},rightAnkle:{x:510,y:900}}),
+  run_flight_a: from(guard,{torso:{x:424,y:600},neck:{x:447,y:543},head:{x:462,y:504},leftElbow:{x:372,y:584},leftWrist:{x:331,y:624},rightElbow:{x:468,y:542},rightWrist:{x:508,y:505},leftHip:{x:390,y:690},rightHip:{x:443,y:682},leftKnee:{x:348,y:744},leftAnkle:{x:302,y:785},rightKnee:{x:487,y:730},rightAnkle:{x:535,y:768}}),
+  run_flight_b: from(guard,{torso:{x:424,y:600},neck:{x:447,y:543},head:{x:462,y:504},leftElbow:{x:468,y:542},leftWrist:{x:508,y:505},rightElbow:{x:372,y:584},rightWrist:{x:331,y:624},leftHip:{x:443,y:682},rightHip:{x:390,y:690},leftKnee:{x:487,y:730},leftAnkle:{x:535,y:768},rightKnee:{x:348,y:744},rightAnkle:{x:302,y:785}}),
+  run_flight: from(guard,{torso:{x:424,y:600},neck:{x:447,y:543},head:{x:462,y:504},leftWrist:{x:331,y:624},rightWrist:{x:508,y:505},leftHip:{x:390,y:690},rightHip:{x:443,y:682},leftKnee:{x:348,y:744},leftAnkle:{x:302,y:785},rightKnee:{x:487,y:730},rightAnkle:{x:535,y:768}}),
+  sit_prepare: from(poses.neutral_stand,{torso:{x:344,y:651},neck:{x:351,y:588},head:{x:356,y:545},leftHip:{x:319,y:740},rightHip:{x:377,y:739},leftKnee:{x:337,y:817},rightKnee:{x:410,y:816},leftWrist:{x:304,y:674},rightWrist:{x:418,y:668}}),
+  sit_lower: from(crouch,{torso:{x:350,y:696},neck:{x:363,y:638},head:{x:372,y:598},leftHip:{x:311,y:786},rightHip:{x:374,y:784},leftKnee:{x:368,y:815},rightKnee:{x:431,y:813},leftAnkle:{x:348,y:900},rightAnkle:{x:445,y:900},leftWrist:{x:315,y:718},rightWrist:{x:412,y:714}}),
+  seated_settle: from(crouch,{torso:{x:370,y:700},neck:{x:378,y:638},head:{x:384,y:596},leftHip:{x:326,y:790},rightHip:{x:389,y:790},leftKnee:{x:417,y:792},rightKnee:{x:472,y:795},leftAnkle:{x:420,y:900},rightAnkle:{x:492,y:900},leftElbow:{x:342,y:695},leftWrist:{x:388,y:760},rightElbow:{x:409,y:695},rightWrist:{x:448,y:760}}),
+  strong_punch_load: from(guard,{torso:{x:321,y:646},neck:{x:327,y:582},head:{x:331,y:538},leftShoulder:{x:298,y:592},leftElbow:{x:355,y:605},leftWrist:{x:391,y:575},rightShoulder:{x:350,y:588},rightElbow:{x:397,y:620},rightWrist:{x:365,y:650},leftHip:{x:309,y:727},rightHip:{x:371,y:738},leftKnee:{x:278,y:816},leftAnkle:{x:247,y:900},rightKnee:{x:430,y:811},rightAnkle:{x:478,y:900}}),
+  strong_punch_contact: from(guard,{torso:{x:424,y:622},neck:{x:438,y:560},head:{x:445,y:517},leftShoulder:{x:401,y:568},leftElbow:{x:478,y:562},leftWrist:{x:575,y:558},rightShoulder:{x:449,y:574},rightElbow:{x:415,y:610},rightWrist:{x:382,y:580},leftHip:{x:371,y:712},rightHip:{x:432,y:704},leftKnee:{x:313,y:802},leftAnkle:{x:262,y:900},rightKnee:{x:489,y:795},rightAnkle:{x:543,y:900}}),
+  strong_punch_follow: from(guard,{torso:{x:441,y:629},neck:{x:452,y:568},head:{x:458,y:526},leftShoulder:{x:417,y:575},leftElbow:{x:492,y:571},leftWrist:{x:583,y:570},rightShoulder:{x:466,y:580},rightElbow:{x:427,y:620},rightWrist:{x:390,y:590},leftHip:{x:382,y:716},rightHip:{x:445,y:707},leftKnee:{x:321,y:806},leftAnkle:{x:268,y:900},rightKnee:{x:501,y:799},rightAnkle:{x:553,y:900}}),
+  stand_load: from(crouch,{torso:{x:420,y:690},neck:{x:432,y:630},head:{x:440,y:590},leftHip:{x:350,y:780},rightHip:{x:410,y:775},leftWrist:{x:365,y:735},rightWrist:{x:430,y:725}}),
+  stand_rise: from(poses.neutral_stand,{torso:{x:390,y:650},neck:{x:395,y:585},head:{x:398,y:540},leftHip:{x:350,y:735},rightHip:{x:405,y:730},leftKnee:{x:320,y:820},rightKnee:{x:445,y:815}}),
+  drink_reach: from(poses.neutral_stand,{rightShoulder:{x:395,y:575},rightElbow:{x:440,y:610},rightWrist:{x:450,y:650},leftWrist:{x:330,y:650},torso:{x:365,y:630}}),
+  drink_raise: from(poses.neutral_stand,{rightElbow:{x:430,y:555},rightWrist:{x:395,y:520},head:{x:365,y:522},neck:{x:365,y:565},torso:{x:362,y:630}}),
+  drink_hold: from(poses.neutral_stand,{rightElbow:{x:425,y:550},rightWrist:{x:390,y:512},head:{x:355,y:525},neck:{x:362,y:566},torso:{x:360,y:632}}),
+  think_shift: from(poses.neutral_stand,{torso:{x:350,y:635},neck:{x:345,y:570},head:{x:338,y:525},rightElbow:{x:410,y:610},rightWrist:{x:370,y:535},leftElbow:{x:315,y:640},leftWrist:{x:355,y:680},leftHip:{x:330,y:720},rightHip:{x:390,y:735}}),
+  step_weight: from(poses.neutral_stand,{torso:{x:345,y:635},head:{x:350,y:525},leftHip:{x:325,y:720},rightHip:{x:390,y:730},leftKnee:{x:315,y:810},rightKnee:{x:430,y:815}}),
+  step_lift: from(poses.neutral_stand,{torso:{x:360,y:630},leftHip:{x:335,y:715},rightHip:{x:390,y:725},leftKnee:{x:390,y:770},leftAnkle:{x:420,y:840},rightKnee:{x:425,y:810},rightAnkle:{x:450,y:900}}),
+  step_plant: from(poses.neutral_stand,{torso:{x:385,y:632},leftHip:{x:355,y:720},rightHip:{x:405,y:720},leftKnee:{x:430,y:805},leftAnkle:{x:490,y:900},rightKnee:{x:380,y:815},rightAnkle:{x:345,y:900}}),
+  step_back_lift: from(poses.neutral_stand,{torso:{x:350,y:630},head:{x:345,y:520},rightHip:{x:390,y:718},rightKnee:{x:350,y:780},rightAnkle:{x:320,y:845},leftKnee:{x:315,y:810},leftAnkle:{x:285,y:900}}),
+  step_back_plant: from(poses.neutral_stand,{torso:{x:335,y:635},rightHip:{x:370,y:722},rightKnee:{x:300,y:810},rightAnkle:{x:245,y:900},leftKnee:{x:390,y:815},leftAnkle:{x:425,y:900}}),
+  wave_ready: from(poses.neutral_stand,{torso:{x:360,y:630},head:{x:370,y:520},rightShoulder:{x:395,y:575},rightElbow:{x:435,y:545},rightWrist:{x:450,y:500},leftWrist:{x:330,y:660},leftHip:{x:335,y:720},rightHip:{x:395,y:730}}),
+  wave_left: from(poses.neutral_stand,{rightElbow:{x:430,y:525},rightWrist:{x:400,y:455},head:{x:370,y:520},torso:{x:358,y:630}}),
+  wave_right: from(poses.neutral_stand,{rightElbow:{x:430,y:525},rightWrist:{x:470,y:455},head:{x:372,y:520},torso:{x:362,y:630}}),
+  point_ready: from(poses.neutral_stand,{head:{x:382,y:522},neck:{x:375,y:565},torso:{x:368,y:632},rightElbow:{x:420,y:590},rightWrist:{x:455,y:565}}),
+  point_extend: from(poses.neutral_stand,{head:{x:395,y:522},neck:{x:385,y:565},torso:{x:378,y:630},rightShoulder:{x:405,y:575},rightElbow:{x:475,y:565},rightWrist:{x:555,y:558},leftWrist:{x:335,y:655},leftHip:{x:345,y:720},rightHip:{x:405,y:718}}),
+  phone_view: from(poses.neutral_stand,{head:{x:370,y:540},neck:{x:370,y:580},torso:{x:365,y:640},rightElbow:{x:420,y:615},rightWrist:{x:395,y:565},leftElbow:{x:330,y:620},leftWrist:{x:360,y:575},leftHip:{x:340,y:725},rightHip:{x:398,y:735}}),
+  read_hold: from(poses.neutral_stand,{head:{x:368,y:545},neck:{x:368,y:585},torso:{x:365,y:642},leftElbow:{x:320,y:620},leftWrist:{x:350,y:595},rightElbow:{x:415,y:620},rightWrist:{x:382,y:595},leftHip:{x:340,y:725},rightHip:{x:395,y:732}}),
+  surprised_open: from(poses.neutral_stand,{head:{x:360,y:495},neck:{x:360,y:545},torso:{x:360,y:615},leftElbow:{x:305,y:575},leftWrist:{x:270,y:520},rightElbow:{x:420,y:575},rightWrist:{x:455,y:520},leftHip:{x:330,y:710},rightHip:{x:392,y:710},leftKnee:{x:300,y:805},rightKnee:{x:430,y:805}}),
+  happy_open: from(poses.neutral_stand,{head:{x:368,y:510},torso:{x:365,y:620},leftElbow:{x:300,y:570},leftWrist:{x:260,y:520},rightElbow:{x:430,y:570},rightWrist:{x:470,y:520},leftHip:{x:335,y:710},rightHip:{x:395,y:720},leftKnee:{x:300,y:790},leftAnkle:{x:270,y:875},rightKnee:{x:435,y:805}}),
+  scared_compress: from(crouch,{head:{x:345,y:575},neck:{x:350,y:620},torso:{x:355,y:680},leftElbow:{x:320,y:625},leftWrist:{x:350,y:570},rightElbow:{x:395,y:625},rightWrist:{x:365,y:565},leftHip:{x:330,y:760},rightHip:{x:390,y:760}}),
+  facepalm_reach: from(poses.neutral_stand,{head:{x:350,y:530},torso:{x:355,y:638},rightElbow:{x:410,y:575},rightWrist:{x:375,y:520},leftWrist:{x:325,y:665}}),
+  facepalm_hold: from(poses.neutral_stand,{head:{x:342,y:545},neck:{x:350,y:585},torso:{x:355,y:650},rightElbow:{x:405,y:570},rightWrist:{x:350,y:530},leftElbow:{x:315,y:640},leftWrist:{x:335,y:690}}),
+  pickup_locate: from(poses.neutral_stand,{head:{x:385,y:545},neck:{x:375,y:580},torso:{x:365,y:640},rightWrist:{x:420,y:650}}),
+  pickup_lower: from(crouch,{head:{x:410,y:625},neck:{x:395,y:655},torso:{x:380,y:705},rightElbow:{x:420,y:720},rightWrist:{x:445,y:805},leftWrist:{x:330,y:720}}),
+  pickup_grab: from(crouch,{head:{x:415,y:630},torso:{x:385,y:710},rightElbow:{x:430,y:755},rightWrist:{x:455,y:875},leftWrist:{x:335,y:735}}),
+  carry_hold: from(poses.neutral_stand,{torso:{x:365,y:635},rightElbow:{x:410,y:620},rightWrist:{x:390,y:675},leftElbow:{x:330,y:620},leftWrist:{x:355,y:675}}),
+  give_extend: from(poses.neutral_stand,{head:{x:390,y:525},torso:{x:378,y:635},rightElbow:{x:455,y:610},rightWrist:{x:520,y:610},leftElbow:{x:420,y:625},leftWrist:{x:500,y:630}}),
+  catch_ready: from(poses.neutral_stand,{head:{x:390,y:520},torso:{x:375,y:635},leftElbow:{x:410,y:590},leftWrist:{x:455,y:575},rightElbow:{x:430,y:610},rightWrist:{x:470,y:585},leftKnee:{x:315,y:815},rightKnee:{x:435,y:810}}),
+  catch_absorb: from(crouch,{head:{x:375,y:565},torso:{x:365,y:675},leftElbow:{x:390,y:620},leftWrist:{x:420,y:640},rightElbow:{x:410,y:630},rightWrist:{x:430,y:645}}),
   idle: poses.idle_relaxed,
   "Fight Stance": poses.fight_guard,
   Crouch: poses.crouch,
@@ -875,5 +958,104 @@ Object.assign(poses, {
   "Kick Extension": poses.front_kick_extension,
   Block: poses.block_high,
   Dodge: poses.dodge_back,
+  // Fight Motion Quality V1 benchmark silhouettes. These remain ordinary
+  // PoseKeyframes when compiled by Fight Director.
+  jab_ready: from(guard,{torso:{x:372,y:634},leftShoulder:{x:390,y:578},leftWrist:{x:448,y:568}}),
+  jab_anticipation_v1: from(guard,{torso:{x:354,y:638},head:{x:382,y:532},leftShoulder:{x:376,y:584},leftElbow:{x:390,y:610},leftWrist:{x:405,y:584},rightHip:{x:350,y:738},leftKnee:{x:402,y:810}}),
+  jab_commit: from(guard,{torso:{x:382,y:622},neck:{x:390,y:560},head:{x:397,y:520},leftShoulder:{x:400,y:566},leftElbow:{x:470,y:558},leftWrist:{x:535,y:552},rightWrist:{x:410,y:590},leftHip:{x:355,y:715},rightHip:{x:415,y:710}}),
+  jab_contact: from(guard,{torso:{x:398,y:620},neck:{x:408,y:558},head:{x:415,y:518},leftShoulder:{x:418,y:565},leftElbow:{x:505,y:552},leftWrist:{x:568,y:548},rightWrist:{x:420,y:588},leftHip:{x:365,y:715},rightHip:{x:425,y:708},rightKnee:{x:470,y:800}}),
+  jab_overshoot: from(guard,{torso:{x:410,y:623},head:{x:428,y:520},leftElbow:{x:515,y:558},leftWrist:{x:578,y:560},rightWrist:{x:430,y:600},leftHip:{x:374,y:718},rightHip:{x:433,y:710}}),
+  jab_recover: from(guard,{torso:{x:374,y:632},leftWrist:{x:438,y:568},rightWrist:{x:397,y:552}}),
+  hook_ready: poses.fight_guard,
+  hook_windup: from(guard,{torso:{x:325,y:630},neck:{x:320,y:565},head:{x:315,y:525},rightShoulder:{x:340,y:575},rightElbow:{x:325,y:520},rightWrist:{x:300,y:505},leftWrist:{x:350,y:575},leftHip:{x:325,y:720},rightHip:{x:380,y:730},rightKnee:{x:440,y:815}}),
+  hook_commit: from(guard,{torso:{x:385,y:625},head:{x:390,y:525},rightShoulder:{x:410,y:570},rightElbow:{x:455,y:535},rightWrist:{x:490,y:565},leftWrist:{x:390,y:585},leftHip:{x:345,y:720},rightHip:{x:410,y:710},leftKnee:{x:295,y:810},rightKnee:{x:475,y:800}}),
+  hook_contact_v1: from(guard,{torso:{x:415,y:620},neck:{x:425,y:560},head:{x:430,y:520},rightShoulder:{x:440,y:565},rightElbow:{x:505,y:535},rightWrist:{x:550,y:565},leftElbow:{x:390,y:600},leftWrist:{x:430,y:620},leftHip:{x:370,y:715},rightHip:{x:435,y:705},rightKnee:{x:495,y:795}}),
+  hook_follow: from(guard,{torso:{x:430,y:630},head:{x:445,y:530},rightElbow:{x:470,y:600},rightWrist:{x:435,y:640},leftWrist:{x:450,y:610},leftHip:{x:385,y:720},rightHip:{x:450,y:710}}),
+  hook_recover: poses.fight_guard,
+  uppercut_ready: poses.fight_guard,
+  uppercut_compress: from(crouch,{torso:{x:340,y:690},neck:{x:345,y:625},head:{x:350,y:585},rightShoulder:{x:370,y:640},rightElbow:{x:390,y:690},rightWrist:{x:360,y:710},leftWrist:{x:330,y:650},leftHip:{x:330,y:755},rightHip:{x:390,y:755}}),
+  uppercut_drive: from(guard,{torso:{x:390,y:610},neck:{x:400,y:545},head:{x:405,y:505},rightShoulder:{x:420,y:555},rightElbow:{x:455,y:570},rightWrist:{x:465,y:530},leftWrist:{x:365,y:585},leftHip:{x:350,y:710},rightHip:{x:415,y:700}}),
+  uppercut_contact_v1: from(guard,{torso:{x:410,y:600},neck:{x:420,y:535},head:{x:425,y:495},rightShoulder:{x:440,y:545},rightElbow:{x:485,y:530},rightWrist:{x:500,y:480},leftElbow:{x:365,y:585},leftWrist:{x:395,y:610},leftHip:{x:365,y:705},rightHip:{x:430,y:695},rightKnee:{x:485,y:790}}),
+  uppercut_follow: from(guard,{torso:{x:420,y:595},head:{x:440,y:490},rightElbow:{x:465,y:495},rightWrist:{x:455,y:440},leftWrist:{x:410,y:610},leftHip:{x:375,y:705},rightHip:{x:440,y:695}}),
+  uppercut_recover: poses.fight_guard,
+  roundhouse_ready: poses.fight_guard,
+  roundhouse_prepare: from(guard,{torso:{x:330,y:630},head:{x:320,y:530},leftShoulder:{x:300,y:580},leftWrist:{x:275,y:625},rightWrist:{x:405,y:565},leftHip:{x:320,y:720},rightHip:{x:380,y:730},leftKnee:{x:285,y:810}}),
+  roundhouse_chamber_v1: from(guard,{torso:{x:350,y:610},head:{x:330,y:510},leftShoulder:{x:315,y:560},leftElbow:{x:270,y:590},leftWrist:{x:235,y:625},rightElbow:{x:420,y:555},rightWrist:{x:465,y:580},leftHip:{x:335,y:715},rightHip:{x:395,y:700},rightKnee:{x:455,y:650},rightAnkle:{x:410,y:610},leftKnee:{x:285,y:805}}),
+  roundhouse_contact_v1: from(guard,{torso:{x:365,y:595},neck:{x:350,y:535},head:{x:335,y:495},leftShoulder:{x:325,y:550},leftElbow:{x:270,y:575},leftWrist:{x:225,y:605},rightShoulder:{x:395,y:545},rightElbow:{x:440,y:575},rightWrist:{x:480,y:610},leftHip:{x:335,y:705},rightHip:{x:400,y:685},rightKnee:{x:485,y:565},rightAnkle:{x:585,y:535},leftKnee:{x:290,y:800},leftAnkle:{x:270,y:895}}),
+  roundhouse_follow: from(guard,{torso:{x:390,y:605},head:{x:370,y:500},leftWrist:{x:245,y:620},rightWrist:{x:470,y:635},leftHip:{x:350,y:710},rightHip:{x:415,y:690},rightKnee:{x:500,y:600},rightAnkle:{x:570,y:625}}),
+  roundhouse_retract: from(guard,{torso:{x:360,y:620},rightKnee:{x:455,y:670},rightAnkle:{x:410,y:650},leftWrist:{x:300,y:590},rightWrist:{x:430,y:580}}),
+  roundhouse_recover: poses.fight_guard,
+  // Fantasy / Supernatural silhouettes are authored in the same canonical
+  // right-facing local space as the grounded benchmark moves.
+  superhero_charge: from(guard,{torso:{x:330,y:655},neck:{x:340,y:590},head:{x:348,y:548},leftShoulder:{x:315,y:600},leftElbow:{x:275,y:630},leftWrist:{x:250,y:675},rightShoulder:{x:360,y:598},rightElbow:{x:320,y:625},rightWrist:{x:292,y:655},leftHip:{x:335,y:735},rightHip:{x:395,y:725},leftKnee:{x:285,y:820},rightKnee:{x:445,y:805}}),
+  superhero_power_contact: from(guard,{torso:{x:414,y:620},neck:{x:426,y:556},head:{x:434,y:514},leftShoulder:{x:398,y:568},leftElbow:{x:460,y:570},leftWrist:{x:520,y:558},rightShoulder:{x:438,y:566},rightElbow:{x:515,y:548},rightWrist:{x:596,y:542},leftHip:{x:375,y:716},rightHip:{x:438,y:706},leftKnee:{x:310,y:808},rightKnee:{x:495,y:790}}),
+  superhero_follow: from(guard,{torso:{x:435,y:630},neck:{x:448,y:568},head:{x:458,y:526},rightShoulder:{x:460,y:575},rightElbow:{x:530,y:575},rightWrist:{x:590,y:590},leftWrist:{x:455,y:610},leftHip:{x:392,y:720},rightHip:{x:452,y:712}}),
+  elastic_charge: from(guard,{torso:{x:315,y:645},neck:{x:325,y:580},head:{x:330,y:538},rightShoulder:{x:342,y:585},rightElbow:{x:305,y:615},rightWrist:{x:275,y:650},leftWrist:{x:350,y:565},leftHip:{x:325,y:730},rightHip:{x:385,y:730}}),
+  elastic_smash_contact: from(guard,{torso:{x:405,y:628},neck:{x:415,y:564},head:{x:422,y:522},rightShoulder:{x:432,y:570},rightElbow:{x:565,y:558},rightWrist:{x:735,y:550},leftShoulder:{x:395,y:578},leftElbow:{x:445,y:590},leftWrist:{x:500,y:582},leftHip:{x:370,y:718},rightHip:{x:432,y:710}}),
+  elastic_recoil: from(guard,{torso:{x:365,y:638},rightShoulder:{x:390,y:582},rightElbow:{x:455,y:600},rightWrist:{x:510,y:620},leftWrist:{x:420,y:570}}),
+  meteor_crouch: from(crouch,{torso:{x:330,y:705},neck:{x:342,y:650},head:{x:350,y:608},leftWrist:{x:275,y:710},rightWrist:{x:395,y:675},leftHip:{x:325,y:780},rightHip:{x:390,y:775}}),
+  meteor_airborne_arch: from(guard,{torso:{x:360,y:590},neck:{x:338,y:535},head:{x:320,y:500},leftShoulder:{x:325,y:548},leftElbow:{x:280,y:505},leftWrist:{x:245,y:470},rightShoulder:{x:372,y:540},rightElbow:{x:420,y:490},rightWrist:{x:455,y:450},leftHip:{x:342,y:675},rightHip:{x:395,y:660},leftKnee:{x:285,y:710},leftAnkle:{x:235,y:685},rightKnee:{x:455,y:700},rightAnkle:{x:500,y:665}}),
+  meteor_dive: from(guard,{torso:{x:405,y:590},neck:{x:425,y:540},head:{x:438,y:505},leftShoulder:{x:395,y:545},leftElbow:{x:455,y:585},leftWrist:{x:515,y:625},rightShoulder:{x:430,y:545},rightElbow:{x:500,y:590},rightWrist:{x:555,y:645},leftHip:{x:365,y:675},rightHip:{x:420,y:665},leftKnee:{x:315,y:720},leftAnkle:{x:275,y:690},rightKnee:{x:465,y:710},rightAnkle:{x:505,y:680}}),
+  meteor_impact: from(crouch,{torso:{x:420,y:690},neck:{x:430,y:630},head:{x:435,y:588},leftShoulder:{x:400,y:642},leftElbow:{x:455,y:685},leftWrist:{x:520,y:720},rightShoulder:{x:442,y:640},rightElbow:{x:505,y:680},rightWrist:{x:565,y:710},leftHip:{x:370,y:765},rightHip:{x:430,y:755},leftKnee:{x:310,y:825},leftAnkle:{x:265,y:900},rightKnee:{x:490,y:820},rightAnkle:{x:545,y:895}}),
+  arcane_charge: from(guard,{torso:{x:350,y:645},neck:{x:358,y:580},head:{x:362,y:538},leftShoulder:{x:330,y:588},leftElbow:{x:290,y:545},leftWrist:{x:275,y:495},rightShoulder:{x:382,y:580},rightElbow:{x:420,y:535},rightWrist:{x:438,y:485},leftHip:{x:340,y:730},rightHip:{x:402,y:725}}),
+  arcane_release: from(guard,{torso:{x:392,y:630},neck:{x:402,y:565},head:{x:408,y:523},leftShoulder:{x:380,y:575},leftElbow:{x:465,y:570},leftWrist:{x:555,y:565},rightShoulder:{x:415,y:573},rightElbow:{x:485,y:590},rightWrist:{x:550,y:610},leftHip:{x:360,y:718},rightHip:{x:422,y:710}}),
+  flame_serpent_cast: from(guard,{torso:{x:382,y:638},neck:{x:390,y:574},head:{x:396,y:532},leftShoulder:{x:365,y:585},leftElbow:{x:440,y:560},leftWrist:{x:525,y:548},rightShoulder:{x:405,y:582},rightElbow:{x:470,y:615},rightWrist:{x:535,y:635},leftHip:{x:350,y:724},rightHip:{x:415,y:715},leftKnee:{x:295,y:812},rightKnee:{x:475,y:800}}),
+  aura_eruption: from(crouch,{torso:{x:360,y:690},neck:{x:360,y:625},head:{x:360,y:583},leftShoulder:{x:330,y:640},leftElbow:{x:285,y:690},leftWrist:{x:255,y:750},rightShoulder:{x:392,y:640},rightElbow:{x:438,y:690},rightWrist:{x:470,y:750},leftHip:{x:330,y:765},rightHip:{x:392,y:765},leftKnee:{x:275,y:825},leftAnkle:{x:225,y:900},rightKnee:{x:450,y:825},rightAnkle:{x:500,y:900}}),
+  fantasy_sword_windup: from(guard,{torso:{x:340,y:640},neck:{x:345,y:575},head:{x:348,y:533},rightShoulder:{x:370,y:580},rightElbow:{x:405,y:515},rightWrist:{x:390,y:445},leftShoulder:{x:335,y:588},leftElbow:{x:370,y:530},leftWrist:{x:385,y:470},leftHip:{x:335,y:728},rightHip:{x:397,y:725}}),
+  fantasy_sword_commit: from(guard,{torso:{x:390,y:615},neck:{x:400,y:552},head:{x:408,y:510},rightShoulder:{x:420,y:558},rightElbow:{x:475,y:520},rightWrist:{x:535,y:500},leftElbow:{x:430,y:535},leftWrist:{x:500,y:510},leftHip:{x:355,y:710},rightHip:{x:422,y:700}}),
+  fantasy_sword_contact: from(guard,{torso:{x:425,y:630},neck:{x:438,y:568},head:{x:448,y:526},rightShoulder:{x:455,y:575},rightElbow:{x:530,y:610},rightWrist:{x:595,y:650},leftShoulder:{x:420,y:580},leftElbow:{x:492,y:600},leftWrist:{x:558,y:638},leftHip:{x:380,y:720},rightHip:{x:445,y:710},leftKnee:{x:315,y:810},rightKnee:{x:505,y:795}}),
+  fantasy_sword_follow: from(guard,{torso:{x:440,y:646},neck:{x:452,y:585},head:{x:460,y:543},rightShoulder:{x:468,y:590},rightElbow:{x:510,y:650},rightWrist:{x:540,y:715},leftElbow:{x:480,y:625},leftWrist:{x:520,y:685},leftHip:{x:395,y:730},rightHip:{x:458,y:718}}),
+  head_hit_contact: from(guard,{head:{x:335,y:520},neck:{x:350,y:560}}),
+  head_hit_snap: from(guard,{head:{x:275,y:535},neck:{x:315,y:570},torso:{x:340,y:630},leftElbow:{x:300,y:610},leftWrist:{x:265,y:655},rightElbow:{x:390,y:625},rightWrist:{x:430,y:670}}),
+  head_hit_recoil: from(guard,{head:{x:250,y:550},neck:{x:295,y:585},torso:{x:320,y:650},leftWrist:{x:250,y:675},rightWrist:{x:445,y:690},leftHip:{x:325,y:730},rightHip:{x:390,y:725}}),
+  uppercut_hit_contact: from(guard,{torso:{x:340,y:640},neck:{x:325,y:570},head:{x:315,y:520},leftWrist:{x:280,y:630},rightWrist:{x:430,y:640}}),
+  uppercut_head_lag: from(guard,{torso:{x:310,y:620},neck:{x:285,y:550},head:{x:270,y:500},leftWrist:{x:260,y:610},rightWrist:{x:445,y:650},leftKnee:{x:295,y:800},rightKnee:{x:435,y:810}}),
+  body_hit_contact: from(guard,{torso:{x:345,y:650},head:{x:350,y:540},leftElbow:{x:315,y:620},rightElbow:{x:410,y:625}}),
+  body_hit_fold: from(crouch,{torso:{x:410,y:700},neck:{x:430,y:640},head:{x:445,y:600},leftElbow:{x:350,y:650},leftWrist:{x:390,y:685},rightElbow:{x:440,y:655},rightWrist:{x:475,y:690}}),
+  body_hit_deep_fold: from(crouch,{torso:{x:430,y:708},neck:{x:458,y:662},head:{x:486,y:632},leftShoulder:{x:407,y:663},leftElbow:{x:352,y:650},leftWrist:{x:306,y:676},rightShoulder:{x:448,y:676},rightElbow:{x:500,y:700},rightWrist:{x:542,y:732},leftHip:{x:376,y:744},rightHip:{x:426,y:750},leftKnee:{x:332,y:810},leftAnkle:{x:292,y:888},rightKnee:{x:458,y:817},rightAnkle:{x:486,y:898}}),
+  body_hit_arm_lag: from(crouch,{torso:{x:400,y:690},head:{x:430,y:585},leftElbow:{x:305,y:665},leftWrist:{x:260,y:700},rightElbow:{x:470,y:650},rightWrist:{x:520,y:680}}),
+  heavy_hit_compress: from(crouch,{torso:{x:395,y:685},head:{x:415,y:580},leftWrist:{x:310,y:660},rightWrist:{x:455,y:660}}),
+  // Roundhouse receiving chain: chest folds first, head and arms lag, then the
+  // pelvis and support legs are pulled into the force line. These are authored
+  // silhouettes rather than rigid whole-character rotation.
+  heavy_kick_contact: from(guard,{torso:{x:326,y:654},neck:{x:338,y:582},head:{x:356,y:532},leftShoulder:{x:306,y:602},leftElbow:{x:270,y:626},leftWrist:{x:234,y:660},rightShoulder:{x:350,y:600},rightElbow:{x:398,y:620},rightWrist:{x:444,y:654},leftHip:{x:350,y:728},rightHip:{x:389,y:720},leftKnee:{x:316,y:812},leftAnkle:{x:278,y:892},rightKnee:{x:430,y:808},rightAnkle:{x:472,y:890}}),
+  heavy_kick_recoil: from(reaction,{torso:{x:280,y:674},neck:{x:301,y:600},head:{x:340,y:548},leftShoulder:{x:264,y:615},leftElbow:{x:214,y:638},leftWrist:{x:166,y:680},rightShoulder:{x:310,y:620},rightElbow:{x:376,y:664},rightWrist:{x:435,y:720},leftHip:{x:326,y:744},rightHip:{x:389,y:727},leftKnee:{x:276,y:808},leftAnkle:{x:240,y:884},rightKnee:{x:452,y:790},rightAnkle:{x:500,y:862}}),
+  knockback_trailing: from(reaction,{torso:{x:268,y:662},neck:{x:294,y:606},head:{x:332,y:570},leftShoulder:{x:250,y:615},leftElbow:{x:196,y:638},leftWrist:{x:145,y:678},rightShoulder:{x:302,y:625},rightElbow:{x:362,y:680},rightWrist:{x:414,y:738},leftHip:{x:315,y:742},rightHip:{x:382,y:731},leftKnee:{x:274,y:770},rightKnee:{x:438,y:782},leftAnkle:{x:232,y:828},rightAnkle:{x:487,y:838}}),
+  stagger_back_1: from(reaction,{torso:{x:300,y:650},head:{x:280,y:545},leftWrist:{x:245,y:675},rightWrist:{x:440,y:690},leftKnee:{x:260,y:805},leftAnkle:{x:210,y:890},rightKnee:{x:445,y:790},rightAnkle:{x:500,y:875}}),
+  stagger_back_2: from(guard,{torso:{x:340,y:645},head:{x:330,y:535},leftWrist:{x:300,y:625},rightWrist:{x:430,y:625},leftKnee:{x:320,y:800},leftAnkle:{x:285,y:890},rightKnee:{x:460,y:825},rightAnkle:{x:510,y:900}}),
 });
 export const mirrored = mirroredLocal;
+export type PoseOrientation="FRONT"|"THREE_QUARTER_LEFT"|"SIDE_LEFT"|"THREE_QUARTER_RIGHT"|"SIDE_RIGHT";
+export const poseOrientations:PoseOrientation[]=["FRONT","THREE_QUARTER_LEFT","SIDE_LEFT","THREE_QUARTER_RIGHT","SIDE_RIGHT"];
+export function orientedPose(source:Pose,orientation:PoseOrientation){
+  if(orientation==="FRONT")return clonePose(source);
+  const left=orientation.endsWith("LEFT"),side=orientation.startsWith("SIDE"),p=clonePose(source),cx=p.root.x,
+    rear=left?"left":"right",lead=left?"right":"left",compression=side ? .22 : .58,depth=side?10:6;
+  const names=Object.keys(p) as JointName[];
+  for(const name of names)p[name].x=cx+(p[name].x-cx)*(side ? .76 : .9);
+  for(const part of ["Shoulder","Elbow","Wrist","Hip","Knee","Ankle"] as const){
+    const rearName=`${rear}${part}` as JointName,leadName=`${lead}${part}` as JointName;
+    p[rearName].x=cx+(p[rearName].x-cx)*compression+(left?depth:-depth);
+    p[leadName].x+=left?-depth:depth;
+  }
+  p.head.x+=left?(side?-18:-10):(side?18:10);
+  p.neck.x+=left?(side?-10:-6):(side?10:6);
+  p.torso.x+=left?(side?-5:-3):(side?5:3);
+  return p;
+}
+
+// Small semantic benchmark library. Each family reuses ordinary authored
+// poses and timing remains owned by Fight Director; no alternate rig or
+// PoseKeyframe format is introduced.
+export const benchmarkReactionFamilies = {
+  HEAD_HIT_LIGHT:["fight_guard","head_hit_contact","head_hit_snap","head_hit_recoil","fight_guard"],
+  HEAD_HIT_HEAVY:["fight_guard","head_hit_contact","head_hit_snap","stagger_back_1","stagger_back_2","fight_guard"],
+  BODY_HIT_LIGHT:["fight_guard","body_hit_contact","body_hit_fold","fight_guard"],
+  BODY_HIT_HEAVY:["fight_guard","body_hit_contact","body_hit_fold","body_hit_deep_fold","body_hit_arm_lag","stagger_back_1","fight_guard"],
+  UPPERCUT_REACTION:["fight_guard","uppercut_hit_contact","uppercut_head_lag","stagger_back_1","fight_guard"],
+  KICK_BODY_REACTION:["fight_guard","heavy_kick_contact","heavy_kick_recoil","knockback_trailing","stagger_back_1","fight_guard"],
+  KICK_HEAD_REACTION:["fight_guard","head_hit_contact","head_hit_snap","heavy_kick_recoil","stagger_back_1","fight_guard"],
+  HEAVY_KNOCKBACK:["heavy_hit_compress","heavy_kick_recoil","knockback_trailing","stagger_back_1","stagger_back_2","combat_recovery"],
+  STAGGER_BACK:["stagger_back_1","stagger_back_2","combat_recovery"],
+  FALL_BACK:["fall_backward_start","fall_backward_ground","ground_recovery_start","stand_recovery"],
+} as const;

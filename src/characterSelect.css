@@ -1,0 +1,9 @@
+.character-live-wrap{position:relative;aspect-ratio:1;background:radial-gradient(circle at 50% 38%,#213454,#0a101d 66%);overflow:hidden}
+.character-select-workspace .character-detail{display:block!important;min-width:0}
+.character-select-workspace .character-preview-stage{display:block;width:100%;min-height:320px}
+.character-live-wrap .character-live-canvas{position:absolute;inset:0;display:block;width:100%;height:100%;opacity:1}
+.character-live-svg{position:absolute;inset:0;width:100%;height:100%}
+.character-idle-rig{transform-box:fill-box;transform-origin:center;animation:character-idle 2.4s ease-in-out infinite}
+.preview-scarf,.preview-cape{transform-box:fill-box;transform-origin:top center;animation:accessory-lag 2.4s ease-in-out infinite}
+@keyframes character-idle{0%,100%{translate:0 0;rotate:0deg}32%{translate:6px -3px;rotate:1.2deg}70%{translate:-5px 2px;rotate:-1deg}}
+@keyframes accessory-lag{0%,100%{rotate:0deg}35%{rotate:-5deg}72%{rotate:4deg}}

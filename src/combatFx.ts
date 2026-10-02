@@ -9,7 +9,7 @@ import type {
 import { swordPropId } from "./meleeCombat";
 
 export type FxCategory =
-  "Trails" | "Impact" | "Elemental" | "Hit Particles" | "Afterimage" | "Clash";
+  "Trails" | "Impact" | "Elemental" | "Hit Particles" | "Blood" | "Afterimage" | "Clash" | "Aura / Power";
 export interface CombatFxPreset {
   id: string;
   name: string;
@@ -26,6 +26,11 @@ export interface CombatFxPreset {
   opacity?: number;
   glow?: number;
   color?: string;
+  secondaryColor?: string;
+  bloodLevel?: "LOW"|"MEDIUM"|"HIGH";
+  arcDegrees?: number;
+  scatterRadius?: number;
+  auraStyle?: Effect["auraStyle"];
   description: string;
 }
 const trail = (
@@ -172,6 +177,7 @@ export const combatFxPresets: CombatFxPreset[] = [
     "Large high-contrast arcade crescent.",
     { glow: 36 },
   ),
+  trail("ink_crescent_slash","Ink Crescent Slash",1.55,112,"#ffffff","Huge white sword crescent with a dark ink-like outer edge for cinematic finishing cuts.",{duration:.72,sampleCount:22,minimumVelocity:3,maximumTrailAge:.46,glow:16,secondaryColor:"#111018"}),
   trail(
     "foot_trail",
     "Foot Trail",
@@ -309,11 +315,29 @@ export const combatFxPresets: CombatFxPreset[] = [
     color: "#eb2d41",
     description: "Large brief arcade particle burst.",
   },
+  {id:"blood_spray_low",name:"Blood Spray — Low",category:"Blood",type:"blood",duration:.34,strength:.5,color:"#a80f27",bloodLevel:"LOW",description:"Small directional blood spray for restrained hit reactions."},
+  {id:"blood_spray_medium",name:"Blood Spray — Medium",category:"Blood",type:"blood",duration:.48,strength:.78,color:"#a80f27",bloodLevel:"MEDIUM",description:"Readable directional blood spray for strong contact."},
+  {id:"blood_spray_high",name:"Blood Spray — High",category:"Blood",type:"blood",duration:.62,strength:1.12,color:"#910b20",bloodLevel:"HIGH",description:"Large cinematic blood spray for heavy or sword impacts."},
+  {id:"flame_aura",name:"Flame Body Aura",category:"Aura / Power",type:"aura",duration:1.2,strength:1,color:"#ffb23f",secondaryColor:"#ff4d35",auraStyle:"flame",arcDegrees:360,scatterRadius:18,description:"Animated flame shell surrounding the fighter."},
+  {id:"spike_aura",name:"Explosive Spike Aura",category:"Aura / Power",type:"aura",duration:1.1,strength:1.15,color:"#ffe66d",secondaryColor:"#ff6b35",auraStyle:"spike",arcDegrees:360,scatterRadius:26,description:"Large jagged power-up silhouette."},
+  {id:"palm_burst",name:"Palm Energy Burst",category:"Aura / Power",type:"aura",duration:.65,strength:.75,color:"#fff3a6",secondaryColor:"#ff8a3d",auraStyle:"palm",arcDegrees:75,scatterRadius:10,description:"Focused impact energy around a hand or contact point."},
+  {id:"spiral_vortex",name:"Spiral Vortex",category:"Aura / Power",type:"aura",duration:1.1,strength:1,color:"#d9f6ff",secondaryColor:"#69d7ff",auraStyle:"vortex",arcDegrees:300,scatterRadius:24,description:"Rotating spiral with scattered energy chips."},
+  {id:"ring_guard",name:"Circular Guard",category:"Aura / Power",type:"aura",duration:1,strength:1,color:"#a7f3ff",secondaryColor:"#ffffff",auraStyle:"ring",arcDegrees:300,scatterRadius:8,description:"Adjustable circular defense or attack arc."},
+  {id:"dragon_power",name:"Dragon Power Aura",category:"Aura / Power",type:"aura",duration:1.35,strength:1.25,color:"#c084fc",secondaryColor:"#ff5d86",auraStyle:"dragon",arcDegrees:270,scatterRadius:28,description:"Tall supernatural aura for ultimate attacks."},
+  {id:"speed_aura",name:"Speed Charge Aura",category:"Aura / Power",type:"aura",duration:.9,strength:1,color:"#91f2ff",secondaryColor:"#ffffff",auraStyle:"speed",arcDegrees:170,scatterRadius:18,description:"Directional charge streaks behind a fighter."},
+  {id:"wing_burst",name:"Wing Energy Burst",category:"Aura / Power",type:"aura",duration:.8,strength:1,color:"#b8f7ff",secondaryColor:"#fff",auraStyle:"wings",arcDegrees:150,scatterRadius:22,description:"Symmetrical back-facing energy wings."},
+  {id:"force_fan",name:"Force Fan",category:"Aura / Power",type:"aura",duration:.7,strength:.9,color:"#a7f3ff",secondaryColor:"#60a5fa",auraStyle:"force",arcDegrees:95,scatterRadius:12,description:"Wide directional force emission."},
+  {id:"shard_burst",name:"Shard Burst",category:"Aura / Power",type:"aura",duration:.75,strength:.9,color:"#dbeafe",secondaryColor:"#7dd3fc",auraStyle:"shards",arcDegrees:240,scatterRadius:35,description:"Scattered supernatural shards around the body."},
+  {id:"lightning_body",name:"Lightning Body",category:"Aura / Power",type:"aura",duration:1.1,strength:1,color:"#fef08a",secondaryColor:"#38bdf8",auraStyle:"lightning",arcDegrees:360,scatterRadius:25,description:"Animated lightning branches around the whole body."},
 ];
 export const defaultCombatFxSettings: CombatFxSettings = {
   intensity: "MEDIUM",
   hitParticles: false,
   autoWeaponTrail: true,
+  blood: "OFF",
+  bloodSpread: 55,
+  bloodAmount: 10,
+  bloodDistance: 100,
 };
 export const fxPreset = (id?: string) =>
   combatFxPresets.find((p) => p.id === id);
@@ -324,7 +348,7 @@ const intensityScale = (settings: CombatFxSettings) =>
 export function makeCombatEffect(
   project: Project,
   preset: CombatFxPreset,
-  actor: string,
+  actor: string | undefined,
   time: number,
   point?: { x: number; y: number },
   direction = { x: 1, y: 0 },
@@ -332,7 +356,7 @@ export function makeCombatEffect(
   const settings = project.combatFx ?? defaultCombatFxSettings;
   if (settings.intensity === "OFF") return null;
   if (preset.type === "hitParticles" && !settings.hitParticles) return null;
-  const pose = project.tracks[actor]
+  const pose = actor&&project.tracks[actor]
       ? poseAt(project.tracks[actor], time)
       : undefined,
     q = point ??
@@ -351,7 +375,7 @@ export function makeCombatEffect(
     targetFighter: actor,
     preset: preset.id,
     trackedJoint: preset.joint,
-    trackedProp: preset.trackedPoint === "weapon" && project.props?.some(p=>p.id===swordPropId(actor)) ? swordPropId(actor) : undefined,
+    trackedProp: actor&&preset.trackedPoint === "weapon" && project.props?.some(p=>p.id===swordPropId(actor)) ? swordPropId(actor) : undefined,
     trackedPoint: preset.trackedPoint,
     directionX: direction.x,
     directionY: direction.y,
@@ -362,18 +386,27 @@ export function makeCombatEffect(
     opacity: preset.opacity,
     glow: preset.glow,
     color: preset.color,
+    secondaryColor:preset.secondaryColor,
+    bloodLevel:preset.bloodLevel,
+    arcDegrees:preset.arcDegrees,
+    scatterRadius:preset.scatterRadius,
+    auraStyle:preset.auraStyle,
+    particleSpread:preset.type==="blood"?(settings.bloodSpread??55)*Math.PI/180:undefined,
+    particleCount:preset.type==="blood"?(settings.bloodAmount??10):undefined,
+    particleSpeed:preset.type==="blood"?(settings.bloodDistance??100)/100:undefined,
     autoTrail: settings.autoWeaponTrail,
   };
 }
 export function addCombatFx(
   project: Project,
   preset: CombatFxPreset,
-  actor: string,
+  actor: string | undefined,
   time: number,
+  point?: {x:number;y:number},
 ) {
   const next = structuredClone(project),
-    effect = makeCombatEffect(next, preset, actor, time);
-  if (effect) next.effects.push(effect);
+    effect = makeCombatEffect(next, preset, actor, time, point);
+  if (effect) {next.effects.push(effect);next.duration=Math.max(next.duration,time+effect.duration);}
   return next;
 }
 export function addContactFx(
@@ -387,6 +420,8 @@ export function addContactFx(
     impact?: string;
     particles?: string;
     afterimage?: string;
+    contact?: {endpoint?:string;target?:string};
+    blood?: "INHERIT" | CombatFxSettings["blood"];
   } = {},
 ) {
   const next = structuredClone(project),
@@ -395,10 +430,10 @@ export function addContactFx(
     dx = b.root.x - a.root.x,
     mag = Math.max(1, Math.abs(dx)),
     direction = { x: dx / mag, y: 0 },
-    point = {
-      x: (a.rightWrist.x + b.torso.x) / 2,
-      y: (a.rightWrist.y + b.torso.y) / 2,
-    };
+    endpoint=(options.contact?.endpoint&&a[options.contact.endpoint as keyof typeof a])||a.rightWrist,
+    targetName=options.contact?.target,
+    targetPoint=targetName==="head"||targetName==="chin"?b.head:targetName==="leg"?{x:(b.leftKnee.x+b.rightKnee.x)/2,y:(b.leftKnee.y+b.rightKnee.y)/2}:targetName==="upperTorso"?{x:(b.neck.x+b.torso.x)/2,y:(b.neck.y+b.torso.y)/2}:b.torso,
+    point = {x:targetPoint.x,y:targetPoint.y};
   const ids = [
     options.trail,
     options.impact ??
@@ -415,6 +450,14 @@ export function addContactFx(
       effect =
         preset && makeCombatEffect(next, preset, actor, time, point, direction);
     if (effect) next.effects.push(effect);
+  }
+  const configured=options.blood==="INHERIT"||!options.blood
+      ?(next.combatFx?.blood??defaultCombatFxSettings.blood)
+      :options.blood;
+  if(configured!=="OFF"){
+    const vertical=Math.max(-.65,Math.min(.65,(targetPoint.y-endpoint.y)/120)),
+      scale=({LOW:.45,MEDIUM:.75,HIGH:1.1} as const)[configured];
+    next.effects.push({id:uid(),time,duration:configured==="HIGH"?.62:configured==="MEDIUM"?.48:.34,type:"blood",x:point.x,y:point.y,strength:scale,targetFighter:target,directionX:direction.x,directionY:vertical,color:"#a80f27",layer:"front",bloodLevel:configured,particleSpread:(next.combatFx?.bloodSpread??55)*Math.PI/180,particleCount:next.combatFx?.bloodAmount??10,particleSpeed:(next.combatFx?.bloodDistance??100)/100});
   }
   return next;
 }

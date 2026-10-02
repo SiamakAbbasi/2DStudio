@@ -1,0 +1,35 @@
+{
+  "duration": 70,
+  "commands": [
+    {"time": 60.0, "type": "POSE", "actor": "a", "name": "Combat Stance", "orientation": "SIDE_RIGHT"},
+    {"time": 60.0, "type": "POSE", "actor": "b", "name": "Combat Stance", "orientation": "SIDE_LEFT"},
+    {"time": 60.0, "type": "SET_FACING", "actor": "a", "facing": "RIGHT", "target": "b"},
+    {"time": 60.0, "type": "SET_FACING", "actor": "b", "facing": "LEFT", "target": "a"},
+    {"time": 60.0, "type": "CAMERA", "name": "Wide Both"},
+
+    {"time": 60.4, "type": "ACTION", "actor": "a", "name": "Approach"},
+
+    {"time": 62.5, "type": "FIGHT_MOVE", "attacker": "a", "target": "b", "name": "Jab", "execution": "ATTACKER_ONLY"},
+    {"time": 62.62, "type": "FIGHT_MOVE", "attacker": "b", "target": "a", "name": "Dodge Back", "execution": "ATTACKER_ONLY"},
+
+    {"time": 63.7, "type": "CAMERA", "name": "Push In", "actor": "a"},
+    {"time": 63.7, "type": "FIGHT_MOVE", "attacker": "b", "target": "a", "name": "Cross", "execution": "PAIRED"},
+    {"time": 64.06, "type": "EFFECT", "actor": "a", "name": "Medium Impact Flash"},
+    {"time": 64.12, "type": "REACTION", "actor": "a", "name": "Head Hit"},
+
+    {"time": 65.25, "type": "POSE", "actor": "a", "name": "Combat Stance", "orientation": "SIDE_RIGHT"},
+    {"time": 65.25, "type": "SET_FACING", "actor": "a", "facing": "RIGHT", "target": "b"},
+
+    {"time": 66.1, "type": "FIGHT_MOVE", "attacker": "a", "target": "b", "name": "Roundhouse", "execution": "PAIRED"},
+    {"time": 66.66, "type": "CAMERA", "name": "Impact Push", "actor": "b"},
+    {"time": 66.66, "type": "EFFECT", "actor": "b", "name": "Heavy Impact Flash"},
+    {"time": 66.66, "type": "EFFECT", "actor": "b", "name": "Blood Spray — Low"},
+    {"time": 66.72, "type": "REACTION", "actor": "b", "name": "Body Hit"},
+    {"time": 67.3, "type": "REACTION", "actor": "b", "name": "Knockback"},
+
+    {"time": 68.35, "type": "POSE", "actor": "b", "name": "Fall Backward Start", "orientation": "SIDE_LEFT"},
+    {"time": 68.9, "type": "POSE", "actor": "b", "name": "Fall Backward Ground", "orientation": "SIDE_LEFT"},
+    {"time": 68.9, "type": "EFFECT", "actor": "b", "name": "Ground Impact"},
+    {"time": 69.4, "type": "CAMERA", "name": "Wide Both"}
+  ]
+}
