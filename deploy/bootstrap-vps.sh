@@ -6,7 +6,7 @@ if [ ! -f .env.production ]; then
   umask 077
   cat > .env.production <<EOF
 VPS_HOST=217.160.50.62
-APP_PORT=80
+APP_PORT=8088
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 SESSION_SECRET=$(openssl rand -hex 48)
 EOF
@@ -15,7 +15,6 @@ fi
 if [ "${DEPLOY_HTTP_PORT:-}" != "" ]; then
   if [ "${DEPLOY_HTTP_PORT}" != "8088" ] && ss -H -ltn "sport = :${DEPLOY_HTTP_PORT}" | grep -q .; then
     ss -lntp "sport = :${DEPLOY_HTTP_PORT}" || true
-    docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}' || true
     echo "Port ${DEPLOY_HTTP_PORT} is already in use; refusing to replace an unrelated service." >&2
     exit 1
   fi
