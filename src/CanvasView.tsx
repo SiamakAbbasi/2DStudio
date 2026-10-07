@@ -922,7 +922,7 @@ export function CanvasView({
       sn = Math.sin(angle);
     return { x: cam.x + dx * cs - dy * sn, y: cam.y + dx * sn + dy * cs };
   };
-  const nearestJoint = (e: React.PointerEvent): JointHit | null => {
+  const nearestJoint = (e: React.PointerEvent | React.MouseEvent): JointHit | null => {
     if(mode!=="pose"||previewCamera)return null;
     const q=point(e),view=editorView(),rect=ref.current!.getBoundingClientRect(),screenScale=view.zoom*rect.width/view.width,hitRadius=16;
     let best:JointHit|null=null;
@@ -1239,7 +1239,7 @@ export function CanvasView({
         if(pathEditing&&activePath&&onPathChange&&activePath.points.length>2){const q=point(e),view=editorView(),rect=ref.current!.getBoundingClientRect(),hit=16/(view.zoom*rect.width/view.width),index=activePath.points.findIndex(p=>Math.hypot(p.x-q.x,p.y-q.y)<=hit);if(index>=0){const next=structuredClone(activePath);next.points.splice(index,1);onPathChange(next);return}}
         onContextMenu(e.clientX, e.clientY);
       }}
-      onDoubleClick={(e) => {if(!pathEditing||!activePath||!onPathChange||activePath.pathType==="straight")return;const q=point(e),table=pathLookup(activePath),nearest=table.reduce((best,item)=>Math.hypot(item.point.x-q.x,item.point.y-q.y)<Math.hypot(best.point.x-q.x,best.point.y-q.y)?item:best,table[0]);if(!nearest)return;const next=structuredClone(activePath),inserted={id:crypto.randomUUID(),x:nearest.point.x,y:nearest.point.y};next.points.splice(nearest.segment+1,0,inserted);if(next.pathType==="bezier"||next.pathType==="free-draw")next.points=smoothPoints(next.points);onPathChange(next)}}
+      onDoubleClick={(e) => {const hit=nearestJoint(e);if(mode==="pose"&&hit&&(hit.joint==="leftToe"||hit.joint==="rightToe")){e.preventDefault();e.stopPropagation();const ankle=hit.joint==="leftToe"?"leftAnkle":"rightAnkle",next=structuredClone(hit.pose);next[hit.joint]={x:next[ankle].x-(next[hit.joint].x-next[ankle].x),y:next[ankle].y-(next[hit.joint].y-next[ankle].y)};onSelectEffect(null);onSelectProp(null);onSelect(hit.char,false);onGestureStart();onPoseChange(hit.char,next);onGestureEnd();setHoverJoint({char:hit.char,joint:hit.joint});return}if(!pathEditing||!activePath||!onPathChange||activePath.pathType==="straight")return;const q=point(e),table=pathLookup(activePath),nearest=table.reduce((best,item)=>Math.hypot(item.point.x-q.x,item.point.y-q.y)<Math.hypot(best.point.x-q.x,best.point.y-q.y)?item:best,table[0]);if(!nearest)return;const next=structuredClone(activePath),inserted={id:crypto.randomUUID(),x:nearest.point.x,y:nearest.point.y};next.points.splice(nearest.segment+1,0,inserted);if(next.pathType==="bezier"||next.pathType==="free-draw")next.points=smoothPoints(next.points);onPathChange(next)}}
     />
   );
 }
