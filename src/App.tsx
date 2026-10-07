@@ -31,8 +31,10 @@ import {applyTimelineSequence,validateTimelineSequence,type TimelineSequence} fr
 import {authoredAutoMotionAnchors,clearAutoMotionKeys,detachAutoMotionKey,generateAutoMotionKeys,type AutoMotionDensity,type AutoMotionTiming} from "./autoMotion";
 import {PathPanel} from "./PathPanel";
 import {bakeMotionPath,createMotionPath,detachMotionPathKey,previewPathProject} from "./motionPath";
-import {detachManualKey,duplicateEntries} from "./timelineAuthoring";
+import {applySelectionRetimePlan,detachManualKey,duplicateEntries,planSelectionRetime} from "./timelineAuthoring";
 import {ToolDrawerHeader} from "./ToolDrawer";
+import {auditionWindow,createTimelineAudition,evaluateTimelineAudition,type TimelineAuditionItem,type TimelineAuditionSession} from "./timelineAudition";
+import type {FightSettings} from "./fightDirector";
 import "./style.css";
 import "./guide.css";
 const actionGlyph: Record<string, string> = {
@@ -96,7 +98,7 @@ const FORMATS = [
   },
 ];
 const DEFAULT_ACTION_CATEGORIES = [
-  "Movement", "Fight", "Lifestyle", "Acting", "Interaction", "Dance", "Fantasy",
+  "Movement", "Fight", "Lifestyle", "Acting", "Interaction", "Dance", "Fantasy", "Old Actions",
   "Social", "Romance", "Family", "Sword / Melee", "Cinematic Action", "Reactions", "Prop Interaction",
 ];
 type ActionEditorState = {
@@ -166,6 +168,8 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
     [scenarioOpen, setScenarioOpen] = useState(false),
     [autoDirectorOpen,setAutoDirectorOpen]=useState(false),
     [fightDirectorOpen,setFightDirectorOpen]=useState(false),
+    [timelineAudition,setTimelineAudition]=useState<TimelineAuditionSession|null>(null),
+    [auditionSpeed,setAuditionSpeed]=useState(1),
     [cinematicOpen,setCinematicOpen]=useState(false),
     [productionOpen,setProductionOpen]=useState(false),
     [masterPreview,setMasterPreview]=useState<{project:Project;time:number;masterTime:number;format:Project["format"]}|null>(null),
@@ -317,6 +321,9 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
     });
   const activePath=p.motionPaths?.find(path=>path.id===selectedPath)??null;
   const pathPreviewProject=pathPreview&&activePath?previewPathProject(p,activePath,time):null;
+  const auditionResult=useMemo(()=>timelineAudition?evaluateTimelineAudition(p,timelineAudition):null,[p,timelineAudition]);
+  const auditionRange=useMemo(()=>timelineAudition?auditionWindow(p,timelineAudition):null,[p,timelineAudition]);
+  const timelineDisplayProject=useMemo(()=>timelineAudition?{...p,duration:Math.max(p.duration,timelineAudition.start+timelineAudition.duration)}:p,[p,timelineAudition]);
   const newPath=(type:MotionPathType)=>{const targetType=selectedProp?"prop":"character",targetId=selectedProp??sel;if(!targetId)return;const start=actionRange?.start??Math.min(time,Math.max(0,p.duration-.001)),path=createMotionPath(p,targetId,targetType,type,start);if(actionRange&&actionRange.end>actionRange.start){path.startTime=actionRange.start;path.endTime=actionRange.end}else path.endTime=Math.min(p.duration,start+1);update(n=>{n.motionPaths??=[];n.motionPaths.push(path)});setSelectedPath(path.id);setPathPreview(false);setPathEditing(true);setRightTool("path");setInspectorHidden(false)};
   const changePath=(path:MotionPath)=>update(n=>{const index=(n.motionPaths??[]).findIndex(x=>x.id===path.id);if(index>=0)n.motionPaths![index]=path});
   const changePathLive=(path:MotionPath)=>setP(old=>{const next=structuredClone(old),index=(next.motionPaths??[]).findIndex(x=>x.id===path.id);if(index>=0)next.motionPaths![index]=path;return next});
@@ -343,6 +350,16 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
     redoStack.current = [];
     setP(next);
   };
+  const startTimelineAudition=(items:TimelineAuditionItem[],settings:FightSettings)=>{
+    setPlaying(false);last.current=0;
+    const session=createTimelineAudition(items,time,settings);
+    setTimelineAudition(session);setAuditionSpeed(1);
+    const range=auditionWindow(p,session);seek(range.start);
+    window.setTimeout(()=>setPlaying(true),0);
+  };
+  const replayTimelineAudition=()=>{if(!auditionRange)return;setPlaying(false);seek(auditionRange.start);window.setTimeout(()=>setPlaying(true),0)};
+  const cancelTimelineAudition=()=>{setPlaying(false);setTimelineAudition(null);setAuditionSpeed(1);last.current=0};
+  const commitTimelineAudition=()=>{if(!auditionResult)return;setPlaying(false);replaceProjectKeepingView(auditionResult.project);setTimelineAudition(null);setAuditionSpeed(1);last.current=0};
   const applySequence=(sequence:TimelineSequence)=>{
     const validation=validateTimelineSequence(p,sequence);
     if(validation!=="VALID")throw new Error(validation);
@@ -635,7 +652,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
     let raf = 0;
     const tick = (now: number) => {
       if (!last.current) last.current = now;
-      rt.current += Math.min(0.05, (now - last.current) / 1000);
+      rt.current += Math.min(0.05, (now - last.current) / 1000) * (timelineAudition ? auditionSpeed : 1);
       last.current = now;
       const t = sourceTimeAt(p.speed, rt.current);
       setTime(t);
@@ -648,7 +665,8 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playing, p]);
+  }, [playing, p, timelineAudition, auditionSpeed]);
+  useEffect(()=>{if(playing&&timelineAudition&&auditionRange&&time>=auditionRange.end){setPlaying(false);setTime(auditionRange.end);rt.current=auditionRange.end;last.current=0}},[playing,timelineAudition,auditionRange,time]);
   useEffect(()=>{if(pathPreview&&activePath&&time>=activePath.endTime){setPlaying(false);setPathPreview(false);setTime(activePath.endTime);rt.current=activePath.endTime;last.current=0}},[time,pathPreview,activePath]);
   const seek = (t: number) => {
     setTime(t);
@@ -973,6 +991,33 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         (e.target as HTMLElement)?.isContentEditable
       )
         return;
+      if (!selectedProp && !selectedEffect && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) {
+        const actorIds = (selectedActors.length ? selectedActors : [sel]).filter((id) => {
+          const actor = p.characters.find((item) => item.id === id);
+          return actor?.visible && !actor.locked && p.tracks[id];
+        });
+        if (actorIds.length) {
+          e.preventDefault();
+          const step = e.ctrlKey || e.metaKey ? 1 : e.shiftKey ? 20 : 5;
+          const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+          const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+          setP((old) => {
+            if (!e.repeat) {
+              undoStack.current.push(structuredClone(old));
+              if (undoStack.current.length > 80) undoStack.current.shift();
+              redoStack.current = [];
+            }
+            const next = structuredClone(old);
+            for (const actorId of actorIds) {
+              const moved = clonePose(poseAt(next.tracks[actorId], time));
+              Object.values(moved).forEach((joint) => { joint.x += dx; joint.y += dy; });
+              mutateCurrentKey(next, actorId, moved);
+            }
+            return next;
+          });
+          return;
+        }
+      }
       if (e.code === "Space" && !e.repeat) {
         e.preventDefault();
         setPlaying((value) => !value);
@@ -983,7 +1028,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
       if (e.key.toLowerCase() === "s") {setTransformMode("scale");setRightTool("transform");setInspectorHidden(false);setPathEditing(false)}
       if (e.key.toLowerCase() === "c") {setTransformMode("camera");setRightTool("camera");setInspectorHidden(false);setPathEditing(false)}
       if (e.key.toLowerCase() === "f") frameActors();
-      if (e.key === "Escape") setLeftDrawer(null);
+      if (e.key === "Escape") {if(timelineAudition){e.preventDefault();cancelTimelineAudition()}else setLeftDrawer(null)}
       if (e.key.toLowerCase() === "h") {
         e.preventDefault();
         flipHorizontal();
@@ -1040,7 +1085,11 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         for (let repeat = 0; repeat < Math.max(1, repetitions); repeat++)
           for (const q of ac.keyframes.filter(key=>key.actorIndex===undefined||key.actorIndex===actorIndex)) {
             let po = clonePose(q.inlinePose ?? poses[q.pose] ?? poses.idle);
-            if(ac.id==="walk"&&actor?.flip)po=mirrored(po);
+            // Locomotion poses and their root displacement must face the same
+            // direction. Flipping only dx makes the body travel left while the
+            // authored support leg still faces right, breaking the ground line
+            // and world-space foot lock.
+            if(ac.supportedOrientations?.includes("SIDE_LEFT")&&actor?.flip)po=mirrored(po);
             // Snapshot the authored pelvis before translating the pose.  Keeping
             // a reference to `po.root` makes the first loop iteration mutate the
             // anchor, so the root moves while every other joint keeps the old
@@ -1353,6 +1402,13 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
           : track === "effects"
             ? project.effects
             : project.speed;
+  const canRetimeTimelineSelection=timelineSelection.length>1&&new Set(timelineSelection.map(ref=>timelineTrack(p,ref.track).find(key=>key.id===ref.id)?.time).filter((value):value is number=>typeof value==="number")).size>1;
+  const retimeTimelineSelection=(speed:number)=>{
+    if(!canRetimeTimelineSelection||Math.abs(speed-1)<.000001)return;
+    const entries=timelineSelection.map(ref=>({track:ref.track,key:timelineTrack(p,ref.track).find(key=>key.id===ref.id)})).filter(entry=>entry.key),tracks=[...new Set(entries.map(entry=>entry.track))],all=Object.fromEntries(tracks.map(track=>[track,timelineTrack(p,track)]));
+    let plan;try{plan=planSelectionRetime(entries,all,speed,p.duration)}catch(error){alert(error instanceof Error?error.message:String(error));return}
+    update(n=>{const next=Object.fromEntries(tracks.map(track=>[track,timelineTrack(n,track)]));applySelectionRetimePlan(next,plan)});
+  };
   const selectTimelineKeys = (keys: TimelineKeyRef[], mode: "replace" | "toggle" | "add") =>
     setTimelineSelection((old) => {
       const token = (key: TimelineKeyRef) => `${key.track}:${key.id}`;
@@ -1565,33 +1621,33 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
     const name = prompt("New category name")?.trim();
     if (name) createActionCategory(name);
   };
-  const renameActionCategory = () => {
-    if (!p.actionCategories?.includes(actionCategory)) return alert("Built-in categories are protected. Create a custom category to rename or delete it.");
-    const name = prompt("Rename category", actionCategory)?.trim();
-    if (!name || actionCategories.some((item) => item !== actionCategory && item.toLowerCase() === name.toLowerCase())) return;
+  const renameActionCategory = (selectedCategory=actionCategory) => {
+    if (!p.actionCategories?.includes(selectedCategory)) return alert("Built-in categories are protected. Create a custom category to rename or delete it.");
+    const name = prompt("Rename category", selectedCategory)?.trim();
+    if (!name || actionCategories.some((item) => item !== selectedCategory && item.toLowerCase() === name.toLowerCase())) return;
     update((project) => {
-      project.actionCategories = (project.actionCategories ?? []).map((item) => item === actionCategory ? name : item);
-      (project.actionCategoryMeta ?? []).forEach((item) => { if(item.name===actionCategory){item.name=name;item.updatedAt=new Date().toISOString();} });
-      (project.customActions ?? []).forEach((action) => { action.categories = action.categories?.map((item) => item === actionCategory ? name : item); });
+      project.actionCategories = (project.actionCategories ?? []).map((item) => item === selectedCategory ? name : item);
+      (project.actionCategoryMeta ?? []).forEach((item) => { if(item.name===selectedCategory){item.name=name;item.updatedAt=new Date().toISOString();} });
+      (project.customActions ?? []).forEach((action) => { action.categories = action.categories?.map((item) => item === selectedCategory ? name : item); });
     });
     setActionCategory(name);
   };
-  const deleteActionCategory = () => {
-    if (!p.actionCategories?.includes(actionCategory)) return alert("Built-in categories are protected.");
-    const count=(p.customActions??[]).filter(action=>action.categories?.includes(actionCategory)).length;
-    const requested=prompt(`Delete category “${actionCategory}”?\n\n${count} Action(s) currently use it. Move them to:`,"Uncategorized")?.trim();
+  const deleteActionCategory = (selectedCategory=actionCategory) => {
+    if (!p.actionCategories?.includes(selectedCategory)) return alert("Built-in categories are protected.");
+    const count=(p.customActions??[]).filter(action=>action.categories?.includes(selectedCategory)).length;
+    const requested=prompt(`Delete category “${selectedCategory}”?\n\n${count} Action(s) currently use it. Move them to:`,"Uncategorized")?.trim();
     if (!requested) return;
-    const destination=requested===actionCategory?"Uncategorized":requested;
+    const destination=requested===selectedCategory?"Uncategorized":requested;
     update((project) => {
-      project.actionCategories = (project.actionCategories ?? []).filter((item) => item !== actionCategory);
-      project.actionCategoryMeta = (project.actionCategoryMeta ?? []).filter((item) => item.name !== actionCategory);
+      project.actionCategories = (project.actionCategories ?? []).filter((item) => item !== selectedCategory);
+      project.actionCategoryMeta = (project.actionCategoryMeta ?? []).filter((item) => item.name !== selectedCategory);
       if(!DEFAULT_ACTION_CATEGORIES.includes(destination)&&!(project.actionCategories??[]).includes(destination)){project.actionCategories??=[];project.actionCategories.push(destination);const now=new Date().toISOString();project.actionCategoryMeta??=[];project.actionCategoryMeta.push({id:`category_${uid()}`,name:destination,sortOrder:project.actionCategoryMeta.length,isSystem:false,createdAt:now,updatedAt:now});}
-      (project.customActions ?? []).forEach((action) => { if (action.categories?.includes(actionCategory)) action.categories = [destination]; });
+      (project.customActions ?? []).forEach((action) => { if (action.categories?.includes(selectedCategory)) action.categories = [destination]; });
     });
     setActionCategory(destination);
   };
-  const moveActionCategory = (delta:number) => {
-    const items=[...(p.actionCategories??[])],index=items.indexOf(actionCategory),target=index+delta;
+  const moveActionCategory = (delta:number,selectedCategory=actionCategory) => {
+    const items=[...(p.actionCategories??[])],index=items.indexOf(selectedCategory),target=index+delta;
     if(index<0||target<0||target>=items.length)return;
     [items[index],items[target]]=[items[target],items[index]];
     update(project=>{project.actionCategories=items;project.actionCategoryMeta??=[];project.actionCategoryMeta.forEach(meta=>{meta.sortOrder=items.indexOf(meta.name);meta.updatedAt=new Date().toISOString();});});
@@ -1638,7 +1694,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         {onExitProject&&<button className="project-exit-button" data-short="← PROJECTS" onClick={onExitProject}>← MY PROJECTS</button>}
         {masterEdit&&<button className="production-button" data-short="↩ MASTER" onClick={commitMasterClip}>↩ RETURN TO MASTER</button>}
         <button className="create-animation" data-short="✦ CREATE" onClick={()=>setAutoDirectorOpen(true)}>✦ CREATE ANIMATION</button>
-        <button className="fight-director-button" data-short="⚔ FIGHT" onClick={()=>setFightDirectorOpen(true)}>⚔ FIGHT</button>
+        <button className="fight-director-button" data-short="◆ MOVESET" onClick={()=>setFightDirectorOpen(true)}>◆ MOVESET</button>
         <button className="cinematic-button" data-short="◒ CINEMA" onClick={()=>setCinematicOpen(true)}>◒ CINEMATIC</button>
         <button className="production-button" data-short="▦ MASTER" onClick={()=>setProductionOpen(true)}>▦ LIBRARY / MASTER</button>
         <button className="combat-button" data-short="✦ FX" onClick={()=>setCombatFxOpen(true)}>✦ COMBAT FX</button>
@@ -2006,29 +2062,15 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
           </details>
           </div>
           <div className={leftDrawer === "actions" ? "drawer-section active" : "drawer-section"}>
-          <h3 className="actions-title">Actions</h3>
+          <h3 className="actions-title">Quick Actions</h3>
           <input
             className="action-search"
             placeholder="Search actions…"
             value={actionSearch}
             onChange={(e) => setActionSearch(e.target.value)}
           />
-          <div className="action-library-tools"><button className="primary" onClick={openCreateAction}>＋ Create from Timeline</button></div>
-          <details className="category-management">
-            <summary>Manage Categories</summary>
-            <div><button onClick={addActionCategory}>＋ New Category</button><button onClick={renameActionCategory} disabled={!p.actionCategories?.includes(actionCategory)}>Rename</button><button className="danger" onClick={deleteActionCategory} disabled={!p.actionCategories?.includes(actionCategory)}>Delete</button><button title="Move category up" onClick={()=>moveActionCategory(-1)} disabled={!p.actionCategories?.includes(actionCategory)}>Move Up</button><button title="Move category down" onClick={()=>moveActionCategory(1)} disabled={!p.actionCategories?.includes(actionCategory)}>Move Down</button></div>
-          </details>
-          <div className="action-categories">
-            {["Favorites", "Recent", "All Actions", ...actionCategories].map((cat) => (
-              <button
-                key={cat}
-                className={actionCategory === cat ? "on" : ""}
-                onClick={() => setActionCategory(cat)}
-              >
-                {cat}
-              </button>
-            ))}
-          </div>
+          <div className="quick-action-tabs"><button className={actionCategory==="Favorites"?"on":""} onClick={()=>setActionCategory("Favorites")}>★ Favorites</button><button className={actionCategory==="Recent"?"on":""} onClick={()=>setActionCategory("Recent")}>↻ Recent</button></div>
+          <button className="open-moveset" onClick={()=>setFightDirectorOpen(true)}>Open MoveSet</button>
           {actionCategory === "Dance" && (
             <div className="dance-panel">
               <div className="dance-style-cards">
@@ -2331,10 +2373,11 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
                     a.categories?.some((c) => c.toLowerCase().includes(q)) ||
                     a.tags?.some((tag)=>tag.toLowerCase().includes(q))
                   );
-                if (actionCategory === "All Actions") return true;
+                if (actionCategory === "All Actions") return favorites.includes(a.name) || recent.includes(a.name);
                 if (actionCategory === "Favorites")
                   return favorites.includes(a.name);
                 if (actionCategory === "Recent") return recent.includes(a.name);
+                if (actionCategory !== "Dance") return favorites.includes(a.name) || recent.includes(a.name);
                 return (
                   a.categories?.includes(actionCategory) &&
                   (actionCategory !== "Dance" || a.style === danceStyle)
@@ -2375,7 +2418,6 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
                   >
                     ★
                   </button>
-                  <div className="custom-action-tools"><button title="Update this Action from the Timeline" aria-label={`Edit ${a.name}`} onClick={() => openEditAction(a)}>✎</button><button title="Duplicate action" onClick={()=>duplicateCustomAction(a)}>⧉</button>{a.id?.startsWith("custom_")&&<button title="Delete custom action" onClick={() => deleteCustomAction(a)}>⌫</button>}</div>
                 </div>
               ))}
           </div>
@@ -2409,7 +2451,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         />
         <div className="stage">
           {masterPreview?<MasterPreviewCanvas project={masterPreview.project} time={masterPreview.time} format={masterPreview.format}/>:<CanvasView
-            project={pathPreviewProject??autoMotionPreview??p}
+            project={pathPreviewProject??autoMotionPreview??auditionResult?.project??p}
             time={time}
             selected={sel}
             selectedProp={selectedProp}
@@ -3273,7 +3315,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         }}
       />
       <Timeline
-        p={p}
+        p={timelineDisplayProject}
         time={time}
         setTime={seek}
         selected={sel}
@@ -3285,6 +3327,8 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         selectedKeys={timelineSelection}
         onSelectionChange={selectTimelineKeys}
         onMoveKeys={moveTimelineKeys}
+        canRetimeSelection={canRetimeTimelineSelection}
+        onRetimeSelection={retimeTimelineSelection}
         snapMode={timelineSnap}
         onSnapMode={setTimelineSnap}
         onDuplicate={()=>duplicateTimelineKeys(false)}
@@ -3306,7 +3350,11 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         collapsed={timelineCollapsed}
         onToggleCollapsed={() => setTimelineCollapsed((value) => !value)}
         onIssue={(id)=>{const issue=p.motionReviews?.find(x=>x.id===id);if(!issue)return;setActiveMotionIssue(id);setSel(issue.actorId);setSelectedActors([issue.actorId]);setTransformMode("pose");seek(issue.time);}}
+        audition={timelineAudition&&auditionResult?{start:timelineAudition.start,duration:timelineAudition.duration,clips:auditionResult.clips}:null}
+        onMoveAudition={start=>setTimelineAudition(old=>old&&({...old,start:Math.min(Math.max(0,start),p.duration)}))}
+        onRetimeAudition={(start,duration)=>setTimelineAudition(old=>old&&({...old,start,duration:Math.max(.05,duration)}))}
       />
+      {timelineAudition&&auditionResult&&<div className="audition-control-bar"><div><small>AUDITION</small><b>{auditionResult.clips.map(clip=>clip.label).join(" → ")}</b><span>{p.characters.find(actor=>actor.id===timelineAudition.items[0]?.attacker)?.name} · {timelineAudition.start.toFixed(3)}s · {timelineAudition.duration.toFixed(2)}s</span></div><button onClick={replayTimelineAudition}>↻ Replay</button><div className="audition-speeds">{[.25,.5,1].map(speed=><button key={speed} className={auditionSpeed===speed?"active":""} onClick={()=>setAuditionSpeed(speed)}>{speed}x</button>)}</div><label>Duration<input aria-label="Audition duration" type="number" min=".05" step=".05" value={timelineAudition.duration.toFixed(2)} onChange={event=>setTimelineAudition(old=>old&&({...old,duration:Math.max(.05,+event.target.value||.05)}))}/></label><button onClick={cancelTimelineAudition}>Cancel</button><button className="audition-commit" onClick={commitTimelineAudition}>✓ Commit{timelineAudition.items.length>1?" Sequence":""}</button></div>}
       {activeMotionIssue&&(()=>{const issues=(p.motionReviews??[]).filter(issue=>issue.status==="review"),index=issues.findIndex(issue=>issue.id===activeMotionIssue),issue=p.motionReviews?.find(issue=>issue.id===activeMotionIssue);if(!issue)return null;const go=(next:number)=>{const target=issues[(next+issues.length)%issues.length];if(!target)return;setActiveMotionIssue(target.id);setSel(target.actorId);setSelectedActors([target.actorId]);setTransformMode("pose");seek(target.time);};const limb=issue.joints.some(j=>j.includes("left"))?"Left ":issue.joints.some(j=>j.includes("right"))?"Right ":"";const part=issue.joints.some(j=>/Wrist|Elbow|Shoulder/.test(j))?"Arm":issue.joints.some(j=>/Ankle|Knee|Hip/.test(j))?"Leg":issue.joints.join(", ");return <div className="motion-review-bar"><button onClick={()=>go(index-1)}>‹ Previous Issue</button><div><b>{(issue.sourceTime??issue.time).toFixed(2)}s · {limb}{part}</b><span>{issue.status==="review"?"Manual Review Required":"Reconstructed"}</span><small>Issue {Math.max(1,index+1)} of {issues.length}</small></div><button onClick={()=>{update(n=>{const found=n.motionReviews?.find(x=>x.id===issue.id);if(found)found.status="resolved";});setActiveMotionIssue(null);}}>Mark Resolved</button><button onClick={()=>go(index+1)}>Next Issue ›</button><button onClick={()=>setActiveMotionIssue(null)}>×</button></div>;})()}
       {actionEditor && (
         <div className="help-backdrop" onClick={() => setActionEditor(null)}>
@@ -3581,7 +3629,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         />
       </Suspense>)}
       {autoDirectorOpen&&<Suspense fallback={<div className="director-backdrop"><div className="motion-loading">Loading Auto Director…</div></div>}><AutoDirectorPanel onClose={()=>setAutoDirectorOpen(false)} onBuild={project=>replaceProject(project)}/></Suspense>}
-      {fightDirectorOpen&&<Suspense fallback={<div className="fight-backdrop"/>}><FightDirectorPanel project={p} playhead={time} onClose={()=>setFightDirectorOpen(false)} onApply={project=>replaceProject(project)}/></Suspense>}
+      {fightDirectorOpen&&<Suspense fallback={<div className="fight-backdrop"/>}><FightDirectorPanel project={p} playhead={time} actions={allActions} categories={actionCategories} favorites={favorites} recent={recent} lastUsed={actionLastUsed} onClose={()=>setFightDirectorOpen(false)} onApply={project=>replaceProject(project)} onAudition={startTimelineAudition} onUseAction={requestAction} onToggleFavorite={name=>setFavorites(old=>old.includes(name)?old.filter(item=>item!==name):[...old,name])} onCreateAction={()=>{setFightDirectorOpen(false);openCreateAction()}} onEditAction={action=>{setFightDirectorOpen(false);openEditAction(action)}} onDuplicateAction={duplicateCustomAction} onDeleteAction={deleteCustomAction} onCreateCategory={addActionCategory} onRenameCategory={renameActionCategory} onDeleteCategory={deleteActionCategory} onMoveCategory={(category,delta)=>moveActionCategory(delta,category)}/></Suspense>}
       {cinematicOpen&&<Suspense fallback={<div className="cinematic-backdrop"/>}><CinematicPanel project={p} time={time} onClose={()=>setCinematicOpen(false)} onApply={project=>replaceProject(project)}/></Suspense>}
       {productionOpen&&<Suspense fallback={<div className="production-backdrop"/>}><ProductionLibraryPanel project={p} time={time} onClose={()=>{setMasterPreview(null);setProductionOpen(false)}} onApply={project=>{setMasterPreview(null);replaceProject(project)}} onPreview={(project,sourceTime,masterTime)=>setMasterPreview({project,time:sourceTime,masterTime,format:p.master?.format??project.format})} onEditClip={editMasterClip}/></Suspense>}
       {combatFxOpen&&<Suspense fallback={<div className="combat-backdrop"/>}><CombatFxPanel project={p} actor={sel} time={time} onClose={()=>setCombatFxOpen(false)} onApply={replaceProjectKeepingView} onSeek={seek}/></Suspense>}

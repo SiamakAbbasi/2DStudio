@@ -9,7 +9,9 @@
     "owner:bootstrap": "tsx server/bootstrap-owner.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "sequence": "node scripts/apply-sequence.mjs"
+    "sequence": "node scripts/apply-sequence.mjs",
+    "qa:timeline-audition": "node scripts/timeline-audition-qa.mjs",
+    "qa:timeline-retime": "tsx src/timelineSelectionRetime.qa.ts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.0.1",

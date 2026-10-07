@@ -5,3 +5,4 @@
 .platform-shell .project-actions details div{top:auto;bottom:44px;z-index:30;min-width:150px;box-shadow:0 14px 34px #000b}
 .platform-shell{height:100vh;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:contain;scrollbar-gutter:stable}
 .platform-shell .legal-main a{color:#59c3ff}
+.auth-help{text-align:right;margin-top:-10px}.auth-description{color:#90a3b6;line-height:1.6}

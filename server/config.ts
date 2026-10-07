@@ -27,7 +27,7 @@ export const config = {
   generalRateLimit: integer("GENERAL_RATE_LIMIT_PER_MINUTE", 100),
   authRateLimit: integer("AUTH_RATE_LIMIT_PER_MINUTE", 5),
   projectBodyLimit: process.env.PROJECT_BODY_LIMIT ?? "10mb",
+  localPasswordReset: process.env.LOCAL_PASSWORD_RESET !== "false" && process.env.NODE_ENV !== "production",
 };
 
 if (config.sessionSecret.length < 32) throw new Error("SESSION_SECRET must contain at least 32 characters");
-

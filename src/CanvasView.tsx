@@ -779,7 +779,9 @@ export function CanvasView({
     if (!selectedCharacter) return;
     const pose = poseAt(project.tracks[selected], time),
       tf = transformAt(project.tracks[selected], time),
-      b = bounds(pose, tf);
+      b = bounds(pose, tf),
+      root = applyTransform(pose.root, pose.root, tf),
+      groundY = Math.min(910, format.height * .8);
     ctx.save();
     ctx.setTransform(
       c.width / viewWidth,
@@ -793,6 +795,25 @@ export function CanvasView({
     ctx.rotate((-cam.rotation * Math.PI) / 180);
     ctx.scale(cam.zoom, cam.zoom);
     ctx.translate(-cam.x, -cam.y);
+    // Editor-only placement guides appear with the selected character. They
+    // provide stage composition anchors plus an exact crosshair through the
+    // actor root, while remaining absent from preview and exported frames.
+    ctx.save();
+    ctx.lineWidth = 1.5 / cam.zoom;
+    ctx.setLineDash([9 / cam.zoom, 8 / cam.zoom]);
+    ctx.strokeStyle = "rgba(150,210,255,.28)";
+    [format.width / 3, format.width / 2, format.width * 2 / 3].forEach((x) => {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, format.height); ctx.stroke();
+    });
+    ctx.beginPath(); ctx.moveTo(0, groundY); ctx.lineTo(format.width, groundY); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,209,102,.68)";
+    ctx.beginPath(); ctx.moveTo(root.x, 0); ctx.lineTo(root.x, format.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, root.y); ctx.lineTo(format.width, root.y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "rgba(255,225,160,.92)";
+    ctx.font = `${13 / cam.zoom}px system-ui`;
+    ctx.fillText(`X ${Math.round(root.x)} · Y ${Math.round(root.y)}`, root.x + 10 / cam.zoom, root.y - 10 / cam.zoom);
+    ctx.restore();
     ctx.strokeStyle = "rgba(100,200,255,.8)";
     ctx.lineWidth = 2 / cam.zoom;
     ctx.setLineDash([8, 7]);

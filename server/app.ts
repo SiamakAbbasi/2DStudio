@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createHash, randomBytes } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
@@ -19,6 +20,7 @@ declare global {
 const normalizeEmail = (value: unknown) => String(value ?? "").trim().toLowerCase();
 const validEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
 const publicUser = (row: any): AuthUser => ({ id: row.id, email: row.email, displayName: row.display_name, avatarUrl: row.avatar_url, role: row.role });
+const hashResetToken = (token: string) => createHash("sha256").update(token).digest("hex");
 const projectView = (row: any) => ({
   id: row.id, name: row.name, description: row.description, projectData: row.project_data,
   thumbnailUrl: row.thumbnail_url, createdAt: row.created_at, updatedAt: row.updated_at,
@@ -94,6 +96,39 @@ app.post("/api/auth/login", authLimiter, async (req, res, next) => {
     req.session.userId = result.rows[0].id;
     res.json({ user: publicUser(result.rows[0]) });
   } catch (error) { next(error); }
+});
+app.post("/api/auth/forgot-password", authLimiter, async (req, res, next) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    if (!validEmail(email)) return res.status(400).json({ error: "Enter a valid email address." });
+    const result = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
+    let developmentResetToken: string | undefined;
+    if (result.rowCount) {
+      const userId = result.rows[0].id, token = randomBytes(32).toString("base64url");
+      await pool.query("DELETE FROM password_reset_tokens WHERE user_id=$1 OR expires_at<=now()", [userId]);
+      await pool.query("INSERT INTO password_reset_tokens(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '15 minutes')", [userId, hashResetToken(token)]);
+      if (config.localPasswordReset) developmentResetToken = token;
+    }
+    res.json({ message: config.localPasswordReset ? "If the account exists, a local one-time reset link is ready." : "If the account exists, a reset request has been recorded.", developmentResetToken });
+  } catch (error) { next(error); }
+});
+app.post("/api/auth/reset-password", authLimiter, async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const token = String(req.body.token ?? ""), password = String(req.body.password ?? ""), confirm = String(req.body.confirmPassword ?? "");
+    if (token.length < 20) return res.status(400).json({ error: "This reset link is invalid." });
+    if (password.length < 10 || password.length > 200) return res.status(400).json({ error: "Password must contain 10–200 characters." });
+    if (password !== confirm) return res.status(400).json({ error: "Passwords do not match." });
+    await client.query("BEGIN");
+    const reset = await client.query("SELECT id,user_id FROM password_reset_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() FOR UPDATE", [hashResetToken(token)]);
+    if (!reset.rowCount) { await client.query("ROLLBACK"); return res.status(400).json({ error: "This reset link is invalid or has expired." }); }
+    const hash = await bcrypt.hash(password, 12), userId = reset.rows[0].user_id;
+    await client.query("UPDATE users SET password_hash=$1,updated_at=now() WHERE id=$2", [hash, userId]);
+    await client.query("UPDATE password_reset_tokens SET used_at=now() WHERE id=$1", [reset.rows[0].id]);
+    await client.query("DELETE FROM user_sessions WHERE sess::jsonb->>'userId'=$1", [String(userId)]);
+    await client.query("COMMIT");
+    res.json({ message: "Password updated. You can now sign in." });
+  } catch (error) { await client.query("ROLLBACK").catch(()=>{}); next(error); } finally { client.release(); }
 });
 app.post("/api/auth/logout", requireAuth, (req, res, next) => req.session.destroy((error) => error ? next(error) : res.status(204).end()));
 app.get("/api/auth/me", (req, res) => res.json({ user: req.authUser ?? null }));
@@ -200,4 +235,3 @@ app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
   if (error?.type === "entity.too.large") return res.status(413).json({ error: "Request body is too large." });
   res.status(500).json({ error: "Unexpected server error." });
 });
-
