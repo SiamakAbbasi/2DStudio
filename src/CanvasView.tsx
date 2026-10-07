@@ -40,6 +40,7 @@ export function drawScene(
   interactive = true,
   preview?: { id: string; pose: Pose } | null,
   viewOverride?: CameraState & { width: number; height: number },
+  effectPreviewId?:string|null,
 ) {
   const format = p.format ?? { width: 1080, height: 1920 },
     fw = format.width,
@@ -137,8 +138,9 @@ export function drawScene(
     const tf = resolvedPropTransform(p,prop.id,time);
     drawProp(ctx, prop.type, prop.color, tf, prop.image);
   }
+  const lensBlood:{seed:number;q:number;fade:number;amount:number;color:string}[]=[];
   for (const e of p.effects) {
-    const age = time - e.time;
+    const realAge=time-e.time,previewBlood=e.type==="blood"&&e.id===effectPreviewId&&realAge>=0&&realAge<Math.min(.04,e.duration*.12),age=previewBlood?e.duration*.42:realAge;
     if (age < 0 || age > e.duration) continue;
     const q = age / e.duration,
       fade = 1 - q;
@@ -231,20 +233,25 @@ export function drawScene(
     if(e.type==="afterimage"&&e.targetFighter){const ch=p.characters.find(c=>c.id===e.targetFighter);if(ch)for(let i=4;i>=1;i--){const po=poseAt(p.tracks[e.targetFighter],Math.max(0,time-i*.06));drawStick(ctx,po,ch.color,fade*.12*(5-i),false)}}
     if(["sparks","hitParticles","clash"].includes(e.type)){ctx.save();const red=e.type==="hitParticles";ctx.strokeStyle=red?(e.color??`rgba(235,45,65,${fade})`):`rgba(255,225,110,${fade})`;ctx.globalAlpha=fade*animated.opacity/100;ctx.lineWidth=4+animated.scale*3;const count=Math.max(1,Math.round(animated.density)),spreadAmount=animated.spread*Math.PI/180,speed=animated.range/100;for(let i=0;i<count;i++){const spread=((i/count)-.5)*spreadAmount,len=(35+i%4*13)*animated.scale*speed,base=Math.atan2(e.directionY??0,e.directionX??1),angle=base+spread,dx=Math.cos(angle)*len,dy=Math.sin(angle)*len;ctx.beginPath();ctx.moveTo(e.x,e.y);ctx.lineTo(e.x+dx*q,e.y+dy*q);ctx.stroke()}if(e.type==="clash"){ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(e.x,e.y,35*fade*animated.scale,0,7);ctx.fill()}ctx.restore()}
     if(e.type==="blood"){
-      const count=Math.max(1,Math.round(animated.density)),base=Math.atan2(e.directionY??0,e.directionX??1),spreadAmount=animated.spread*Math.PI/180,speedScale=animated.range/100;
-      ctx.save();ctx.fillStyle=e.color??"#a80f27";ctx.strokeStyle=e.color??"#a80f27";ctx.globalAlpha=Math.min(1,fade*1.4)*animated.opacity/100;ctx.lineCap="round";
+      const count=Math.max(1,Math.round(animated.density)),base=Math.atan2(e.directionY??0,e.directionX??1),spreadAmount=animated.spread*Math.PI/180,speedScale=animated.range/100,seed=[...e.id].reduce((sum,char)=>sum+char.charCodeAt(0),0),random=(index:number,salt=0)=>{const value=Math.sin((seed+index*73+salt*191)*12.9898)*43758.5453;return value-Math.floor(value)};
+      ctx.save();ctx.lineCap="round";
       for(let i=0;i<count;i++){
-        const spread=((i/(Math.max(1,count-1)))-.5)*spreadAmount,angle=base+spread,
-          speed=(46+(i%4)*19)*animated.scale*speedScale,gravity=78*q*q,
-          x=e.x+Math.cos(angle)*speed*q,y=e.y+Math.sin(angle)*speed*q+gravity,
-          radius=Math.max(2,5.5*animated.scale*(1-q*.55)*(i%3===0?1.25:.75));
-        ctx.lineWidth=Math.max(2,radius*.7);ctx.beginPath();ctx.moveTo(e.x+Math.cos(angle)*speed*q*.62,e.y+Math.sin(angle)*speed*q*.62+gravity*.38);ctx.lineTo(x,y);ctx.stroke();
-        ctx.beginPath();ctx.arc(x,y,radius,0,Math.PI*2);ctx.fill();
+        const angle=base+(random(i,1)-.5)*spreadAmount,originScatter=animated.scatterRadius*random(i,2),originAngle=random(i,3)*Math.PI*2,originX=e.x+Math.cos(originAngle)*originScatter*.35,originY=e.y+Math.sin(originAngle)*originScatter*.35,
+          speed=(42+random(i,4)*145)*animated.scale*speedScale,gravity=(70+random(i,5)*85)*q*q,
+          x=originX+Math.cos(angle)*speed*q,y=originY+Math.sin(angle)*speed*q+gravity,
+          velocityX=Math.cos(angle)*speed,velocityY=Math.sin(angle)*speed+(140+random(i,5)*80)*q,
+          radius=Math.max(1.4,(2.2+random(i,6)*5.8)*Math.sqrt(Math.max(.2,animated.scale))*(1-q*.38)),rotation=Math.atan2(velocityY,velocityX),dropAlpha=Math.min(1,fade*1.8)*animated.opacity/100;
+        ctx.globalAlpha=dropAlpha;ctx.fillStyle=i%5===0?(e.secondaryColor??"#5d0717"):(e.color??"#b3122d");ctx.strokeStyle=e.color??"#8f0b22";
+        if(q<.68&&random(i,7)>.3){const trail=(8+random(i,8)*24)*animated.scale;ctx.lineWidth=Math.max(1.2,radius*.45);ctx.beginPath();ctx.moveTo(x-Math.cos(rotation)*trail,y-Math.sin(rotation)*trail);ctx.lineTo(x,y);ctx.stroke()}
+        ctx.save();ctx.translate(x,y);ctx.rotate(rotation);ctx.beginPath();ctx.ellipse(0,0,radius*1.65,radius*.82,0,0,Math.PI*2);ctx.fill();ctx.beginPath();ctx.moveTo(-radius*2.1,0);ctx.lineTo(-radius*.7,-radius*.58);ctx.lineTo(-radius*.7,radius*.58);ctx.closePath();ctx.fill();ctx.restore();
+        if(i%4===0){ctx.globalAlpha=dropAlpha*.72;ctx.beginPath();ctx.arc(x+(random(i,9)-.5)*radius*5,y+(random(i,10)-.5)*radius*5,Math.max(1,radius*.32),0,Math.PI*2);ctx.fill()}
       }
+      if(q>.18&&q<.94&&count>=8)lensBlood.push({seed,q,fade:animated.opacity/100*Math.min(1,(q-.18)/.12)*Math.min(1,(.94-q)/.18),amount:Math.min(5,1+Math.floor(count/12)),color:e.color??"#8f0b22"});
       ctx.restore();
     }
   }
   ctx.restore();
+  if(lensBlood.length){ctx.save();ctx.setTransform(1,0,0,1,0,0);for(const spray of lensBlood){for(let i=0;i<spray.amount;i++){const random=(salt:number)=>{const value=Math.sin((spray.seed+i*97+salt*241)*7.123)*9182.771;return value-Math.floor(value)},x=w*(.08+random(1)*.84),y=h*(.08+random(2)*.78),radius=Math.max(5,Math.min(w,h)*(.012+random(3)*.025)),alpha=spray.fade*(.2+random(4)*.32);ctx.globalAlpha=alpha;ctx.fillStyle=spray.color;ctx.save();ctx.translate(x,y);ctx.rotate((random(5)-.5)*1.5);ctx.beginPath();ctx.ellipse(0,0,radius*.72,radius*1.15,0,0,Math.PI*2);ctx.fill();ctx.beginPath();ctx.moveTo(0,radius*.6);ctx.quadraticCurveTo(radius*.25,radius*1.55,0,radius*2.35);ctx.quadraticCurveTo(-radius*.22,radius*1.5,0,radius*.6);ctx.fill();ctx.restore();for(let j=0;j<2;j++){ctx.globalAlpha=alpha*.65;ctx.beginPath();ctx.arc(x+(random(7+j)-.5)*radius*3.4,y+(random(9+j)-.5)*radius*2.8,Math.max(2,radius*(.12+random(11+j)*.16)),0,Math.PI*2);ctx.fill()}}}ctx.restore()}
 }
 function drawProp(
   ctx: CanvasRenderingContext2D,
@@ -392,6 +399,31 @@ export function drawStick(
   const segmentPoints=(a:{x:number;y:number},b:{x:number;y:number},width=thickness)=>{
     ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
   };
+  const smoothSpine=()=>{
+    const root=p.root,waist=p.torso,neck=p.neck;
+    // Two cubic sections meet at the authored torso control with the same
+    // tangent. This keeps the existing three-joint rig fully editable while
+    // removing the sharp V-shaped hinge produced by two straight capsules.
+    const tangent={x:(neck.x-root.x)*.18,y:(neck.y-root.y)*.18};
+    ctx.lineWidth=thickness;ctx.beginPath();ctx.moveTo(root.x,root.y);
+    ctx.bezierCurveTo(
+      root.x+(waist.x-root.x)*.42,
+      root.y+(waist.y-root.y)*.42,
+      waist.x-tangent.x,
+      waist.y-tangent.y,
+      waist.x,
+      waist.y,
+    );
+    ctx.bezierCurveTo(
+      waist.x+tangent.x,
+      waist.y+tangent.y,
+      neck.x-(neck.x-waist.x)*.42,
+      neck.y-(neck.y-waist.y)*.42,
+      neck.x,
+      neck.y,
+    );
+    ctx.stroke();
+  };
   const joint=(name:JointName,r=visual.joint)=>{ctx.beginPath();ctx.arc(p[name].x,p[name].y,r,0,Math.PI*2);ctx.fill()};
 
   // Limbs remain driven by the original bones, but are rendered as overlapping
@@ -421,9 +453,8 @@ export function drawStick(
   // polygon derived from shoulder/hip distance, it cannot balloon or fold
   // over itself in wide or crouched poses.
   const ls=p.leftShoulder,rs=p.rightShoulder;
-  segment("root","torso");
-  segment("torso","neck");
-  joint("root");joint("torso");joint("neck");
+  smoothSpine();
+  joint("root");joint("neck");
   (["leftShoulder","rightShoulder"] as JointName[]).forEach((name)=>joint(name));
 
   // The neck and filled head sit above the body silhouette; accessories are
@@ -492,6 +523,12 @@ type Drag = {
   freeDraw?:V[];
 };
 type JointHit = { char: string; joint: JointName; pose: Pose; transform: CharacterTransform; distance: number };
+const jointDisplayName=(joint:JointName)=>{
+  if(joint==="root")return "Pelvis / Root";
+  if(joint==="torso")return "Spine / Waist";
+  return joint.replace(/([A-Z])/g," $1").replace(/^./,letter=>letter.toUpperCase());
+};
+const jointEditorColor=(joint:JointName)=>joint.startsWith("left")?"#54d8ff":joint.startsWith("right")?"#ff78bd":["root","torso"].includes(joint)?"#ffc857":"#9df59a";
 const rigChildren:Partial<Record<JointName,JointName[]>>={
   root:["torso","leftHip","rightHip"],torso:["neck"],neck:["head","leftShoulder","rightShoulder"],
   leftShoulder:["leftElbow"],leftElbow:["leftWrist"],rightShoulder:["rightElbow"],rightElbow:["rightWrist"],
@@ -513,6 +550,13 @@ export function editRigJoint(source:Pose,joint:JointName,target:{x:number;y:numb
     const solveKnee=(hip:JointName,knee:JointName,ankle:JointName)=>{const h=pose[hip],a=source[ankle],preferred=source[knee],upper=Math.hypot(source[knee].x-source[hip].x,source[knee].y-source[hip].y),lower=Math.hypot(source[ankle].x-source[knee].x,source[ankle].y-source[knee].y),vx=a.x-h.x,vy=a.y-h.y,d=Math.max(1,Math.hypot(vx,vy)),along=(d*d+upper*upper-lower*lower)/(2*d),height=Math.sqrt(Math.max(0,upper*upper-along*along)),ux=vx/d,uy=vy/d,base={x:h.x+ux*along,y:h.y+uy*along},p1={x:base.x-uy*height,y:base.y+ux*height},p2={x:base.x+uy*height,y:base.y-ux*height};pose[knee]=Math.hypot(p1.x-preferred.x,p1.y-preferred.y)<=Math.hypot(p2.x-preferred.x,p2.y-preferred.y)?p1:p2};
     for(const name of ["root","torso","neck","head","leftShoulder","leftElbow","leftWrist","rightShoulder","rightElbow","rightWrist","leftHip","rightHip"] as JointName[]){pose[name].x+=dx;pose[name].y+=dy}
     solveKnee("leftHip","leftKnee","leftAnkle");solveKnee("rightHip","rightKnee","rightAnkle");
+    return pose;
+  }
+  // Feet are direction controls, not load-bearing IK bones. Let the toe
+  // endpoint follow the pointer directly so it can cross over the ankle in
+  // one gesture and reverse facing without fighting a fixed-radius orbit.
+  if(joint==="leftToe"||joint==="rightToe"){
+    pose[joint]={x:target.x,y:target.y};
     return pose;
   }
   const parent=rigParent[joint];let next=target;
@@ -668,6 +712,7 @@ export function CanvasView({
       true,
       preview,
       previewCamera ? undefined : view,
+      selectedEffect,
     );
     if (!previewCamera) {
       const width = format.width / outputCam.zoom,
@@ -752,8 +797,9 @@ export function CanvasView({
         ctx.setLineDash([]);
         ctx.fillStyle = "#ff5d86";
         ctx.beginPath();
-        ctx.arc(effect.x, effect.y, 7 / cam.zoom, 0, Math.PI * 2);
+        ctx.arc(effect.x, effect.y, 9 / cam.zoom, 0, Math.PI * 2);
         ctx.fill();
+        ctx.font=`600 ${13/cam.zoom}px system-ui`;ctx.textBaseline="middle";const label="FX · drag to move",padding=7/cam.zoom,labelWidth=ctx.measureText(label).width+padding*2,labelHeight=25/cam.zoom,labelX=effect.x+14/cam.zoom,labelY=effect.y-labelHeight/2;ctx.fillStyle="rgba(22,8,16,.92)";ctx.strokeStyle="#ff5d86";ctx.lineWidth=1.5/cam.zoom;ctx.beginPath();ctx.roundRect(labelX,labelY,labelWidth,labelHeight,5/cam.zoom);ctx.fill();ctx.stroke();ctx.fillStyle="#ffd7e3";ctx.fillText(label,labelX+padding,effect.y);
       }
       ctx.restore();
       return;
@@ -822,7 +868,8 @@ export function CanvasView({
     if(mode==="pose"){
       ctx.save();ctx.lineWidth=3/cam.zoom;ctx.strokeStyle="rgba(90,215,255,.78)";
       for(const [a,boneEnd] of bones){const aa=applyTransform(pose[a],pose.root,tf),bb=applyTransform(pose[boneEnd],pose.root,tf);ctx.beginPath();ctx.moveTo(aa.x,aa.y);ctx.lineTo(bb.x,bb.y);ctx.stroke()}
-      for(const name of joints){const point=applyTransform(pose[name],pose.root,tf),root=name==="root",hot=hoverJoint?.char===selected&&hoverJoint.joint===name;ctx.fillStyle=root?"#ffb84d":"#102235";ctx.strokeStyle=hot?"#e9fbff":root?"#ffe1a8":"#67d4ff";ctx.lineWidth=(hot?5:3)/cam.zoom;if(root){const s=(hot?11:9)/cam.zoom;ctx.save();ctx.translate(point.x,point.y);ctx.rotate(Math.PI/4);ctx.fillRect(-s,-s,s*2,s*2);ctx.strokeRect(-s,-s,s*2,s*2);ctx.restore()}else{ctx.beginPath();ctx.arc(point.x,point.y,(hot?11:8)/cam.zoom,0,Math.PI*2);ctx.fill();ctx.stroke();if(hot){ctx.beginPath();ctx.arc(point.x,point.y,15/cam.zoom,0,Math.PI*2);ctx.stroke()}}}
+      for(const name of joints){const point=applyTransform(pose[name],pose.root,tf),root=name==="root",hot=hoverJoint?.char===selected&&hoverJoint.joint===name,color=jointEditorColor(name);ctx.fillStyle=root?"#3a2b10":"#102235";ctx.strokeStyle=hot?"#ffffff":color;ctx.lineWidth=(hot?5:3)/cam.zoom;if(root){const s=(hot?11:9)/cam.zoom;ctx.save();ctx.translate(point.x,point.y);ctx.rotate(Math.PI/4);ctx.fillRect(-s,-s,s*2,s*2);ctx.strokeRect(-s,-s,s*2,s*2);ctx.restore()}else{ctx.beginPath();ctx.arc(point.x,point.y,(hot?11:8)/cam.zoom,0,Math.PI*2);ctx.fill();ctx.stroke();if(hot){ctx.strokeStyle=color;ctx.beginPath();ctx.arc(point.x,point.y,15/cam.zoom,0,Math.PI*2);ctx.stroke()}}}
+      if(hoverJoint?.char===selected){const name=hoverJoint.joint,point=applyTransform(pose[name],pose.root,tf),label=jointDisplayName(name),fontSize=15/cam.zoom,padX=9/cam.zoom,padY=6/cam.zoom,offset=20/cam.zoom;ctx.font=`600 ${fontSize}px system-ui`;const width=ctx.measureText(label).width+padX*2,height=fontSize+padY*2,x=point.x+offset,y=point.y-height-offset*.45;ctx.fillStyle="rgba(5,13,25,.94)";ctx.strokeStyle=jointEditorColor(name);ctx.lineWidth=2/cam.zoom;ctx.beginPath();ctx.roundRect(x,y,width,height,6/cam.zoom);ctx.fill();ctx.stroke();ctx.fillStyle="#f5fbff";ctx.textBaseline="middle";ctx.fillText(label,x+padX,y+height/2)}
       ctx.restore();
     }
     ctx.fillStyle = "#07111f";
@@ -892,6 +939,18 @@ export function CanvasView({
     }
     return best;
   };
+  const characterBodyAt=(q:{x:number;y:number})=>{
+    const view=editorView(),rect=ref.current!.getBoundingClientRect(),screenScale=view.zoom*rect.width/view.width,pointSegmentDistance=(point:{x:number;y:number},a:{x:number;y:number},b:{x:number;y:number})=>{const dx=b.x-a.x,dy=b.y-a.y,length=dx*dx+dy*dy,t=length?Math.max(0,Math.min(1,((point.x-a.x)*dx+(point.y-a.y)*dy)/length)):0;return Math.hypot(point.x-(a.x+dx*t),point.y-(a.y+dy*t))};
+    let best:{char:string;pose:Pose;transform:CharacterTransform;distance:number}|null=null;
+    for(const character of [...project.characters].reverse()){
+      if(!character.visible||character.locked)continue;
+      const pose=poseAt(project.tracks[character.id],time),transform=transformAt(project.tracks[character.id],time),head=applyTransform(pose.head,pose.root,transform);
+      let distance=Math.max(0,Math.hypot(q.x-head.x,q.y-head.y)-44*Math.max(Math.abs(transform.scaleX),Math.abs(transform.scaleY)))*screenScale;
+      for(const [start,end] of bones){const a=applyTransform(pose[start],pose.root,transform),b=applyTransform(pose[end],pose.root,transform);distance=Math.min(distance,pointSegmentDistance(q,a,b)*screenScale)}
+      if(distance<=24&&(!best||distance<best.distance))best={char:character.id,pose,transform,distance};
+    }
+    return best;
+  };
   const down = (e: React.PointerEvent) => {
     gestureView.current=editorView();
     const q = point(e);
@@ -901,11 +960,26 @@ export function CanvasView({
       const table=pathLookup(activePath),near=table.some(item=>Math.hypot(q.x-item.point.x,q.y-item.point.y)<=12/scale);if(near){drag.current={char:"",mode,pose:basePose(q.x,q.y),transform:{rotation:0,scaleX:1,scaleY:1,flipH:false,flipV:false},start:q,pathAction:"move",pathStart:structuredClone(activePath)};onGestureStart();ref.current!.setPointerCapture(e.pointerId);return}
       if(activePath.pathType==="free-draw"){drag.current={char:"",mode,pose:basePose(q.x,q.y),transform:{rotation:0,scaleX:1,scaleY:1,flipH:false,flipV:false},start:q,pathAction:"draw",pathStart:structuredClone(activePath),freeDraw:[q]};onGestureStart();ref.current!.setPointerCapture(e.pointerId);return}
     }
+    const selectedFx=selectedEffect?project.effects.find(effect=>effect.id===selectedEffect):undefined;
+    if(selectedFx&&Math.hypot(q.x-selectedFx.x,q.y-selectedFx.y)<=24/editorView().zoom){
+      e.preventDefault();e.stopPropagation();
+      drag.current={char:"",effectId:selectedFx.id,effectPosition:{x:selectedFx.x,y:selectedFx.y},mode:"move",pose:basePose(q.x,q.y),transform:{rotation:0,scaleX:1,scaleY:1,flipH:false,flipV:false},start:q};
+      onGestureStart();ref.current!.setPointerCapture(e.pointerId);return;
+    }
     const jointHit=nearestJoint(e);
     if(jointHit){
       e.preventDefault();e.stopPropagation();
       onSelectEffect(null);onSelectProp(null);onSelect(jointHit.char,e.shiftKey);setHoverJoint({char:jointHit.char,joint:jointHit.joint});
       drag.current={char:jointHit.char,mode:"pose",pose:jointHit.pose,transform:jointHit.transform,start:q,joint:jointHit.joint,startClient:{x:e.clientX,y:e.clientY},moved:false};
+      onGestureStart();ref.current!.setPointerCapture(e.pointerId);return;
+    }
+    // A large visual effect may cover most of the canvas. The painted actor
+    // silhouette is a more specific target, so it wins before FX hit areas.
+    const bodyHit=mode!=="camera"?characterBodyAt(q):null;
+    if(bodyHit){
+      onSelectEffect(null);onSelectProp(null);onSelect(bodyHit.char,e.shiftKey);
+      if(mode==="pose")return;
+      drag.current={char:bodyHit.char,mode,pose:bodyHit.pose,transform:bodyHit.transform,start:q,startAngle:Math.atan2(q.y-bodyHit.pose.root.y,q.x-bodyHit.pose.root.x),startDistance:Math.hypot(q.x-bodyHit.pose.root.x,q.y-bodyHit.pose.root.y)};
       onGestureStart();ref.current!.setPointerCapture(e.pointerId);return;
     }
     if (mode === "camera" && !previewCamera) {

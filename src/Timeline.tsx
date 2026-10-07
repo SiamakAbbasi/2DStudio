@@ -7,9 +7,9 @@ export type TimelineKeyRef = { track: string; id: string };
 export type TimelineSnap = "off"|".01"|".02"|".04"|".05"|".1"|"frame";
 type SelectionMode = "replace" | "toggle" | "add";
 
-export function Timeline({p,time,setTime,selected,playing,onTogglePlayback,onStopPlayback,activeActionName,onUpdateAction,onMoveKeys,selectedKeys,onSelectionChange,range,onRangeChange,onCreateAction,onAutoMotion,onClearAutoMotion,collapsed=false,onToggleCollapsed,onIssue,snapMode,onSnapMode,onDuplicate,onDuplicateAtPlayhead,onCopy,onPaste,onDelete,onEditPose,duplicateOffset,onDuplicateOffset,selectedPath,onSelectPath,onRetimePath,audition,onMoveAudition,onRetimeAudition,canRetimeSelection,onRetimeSelection}:{
+export function Timeline({p,time,setTime,selected,playing,onTogglePlayback,onPlaySelection,selectionPlayback,onStopPlayback,activeActionName,onUpdateAction,onMoveKeys,selectedKeys,onSelectionChange,range,onRangeChange,onCreateAction,onAutoMotion,onClearAutoMotion,collapsed=false,onToggleCollapsed,onIssue,snapMode,onSnapMode,onDuplicate,onDuplicateAtPlayhead,onCopy,onPaste,onDelete,onEditPose,duplicateOffset,onDuplicateOffset,selectedPath,onSelectPath,onRetimePath,audition,onMoveAudition,onRetimeAudition,canRetimeSelection,onRetimeSelection}:{
   p:Project;time:number;setTime:(n:number)=>void;selected:string;
-  playing:boolean;onTogglePlayback:()=>void;onStopPlayback:()=>void;
+  playing:boolean;onTogglePlayback:()=>void;onPlaySelection:()=>void;selectionPlayback:boolean;onStopPlayback:()=>void;
   activeActionName?:string;onUpdateAction?:()=>void;
   onMoveKeys:(keys:TimelineKeyRef[],delta:number)=>void;
   canRetimeSelection:boolean;onRetimeSelection:(speed:number)=>void;
@@ -43,6 +43,8 @@ export function Timeline({p,time,setTime,selected,playing,onTogglePlayback,onSto
       const left=Math.min(latest.x1,latest.x2)+bounds.left,right=Math.max(latest.x1,latest.x2)+bounds.left,top=Math.min(latest.y1,latest.y2)+bounds.top,bottom=Math.max(latest.y1,latest.y2)+bounds.top;
       const refs=Array.from(host.querySelectorAll<HTMLButtonElement>(".timeline-key")).filter(el=>{const r=el.getBoundingClientRect();return r.right>=left&&r.left<=right&&r.bottom>=top&&r.top<=bottom}).map(el=>({track:el.dataset.track!,id:el.dataset.id!}));
       onSelectionChange(refs,u.shiftKey?"add":"replace");
+      const selectedTimes=refs.map(ref=>tracks.find(([name])=>name===ref.track)?.[1].find((key:any)=>key.id===ref.id)?.time).filter((value):value is number=>Number.isFinite(value));
+      if(selectedTimes.length)setTime(Math.min(...selectedTimes));
     };
     addEventListener("pointermove",move);addEventListener("pointerup",up);
   };
@@ -53,6 +55,7 @@ export function Timeline({p,time,setTime,selected,playing,onTogglePlayback,onSto
       <b>Timeline</b>
       <div className="timeline-tool-group playback-group" aria-label="Timeline playback">
         <button className={`timeline-play ${playing?"active":""}`} onClick={onTogglePlayback} aria-label={playing?"Pause":"Play"} title={`${playing?"Pause":"Play"} · Space`}>{playing?"Ⅱ":"▶"}</button>
+        <button className={`timeline-play-selection ${selectionPlayback?"active":""}`} disabled={new Set(selectedKeys.map(ref=>tracks.find(([name])=>name===ref.track)?.[1].find((key:any)=>key.id===ref.id)?.time).filter(Number.isFinite)).size<2} onClick={onPlaySelection} aria-label="Play selected keyframe range" title="Play only from the first to last selected keyframe">▶◆</button>
         <button className="timeline-stop" onClick={onStopPlayback} aria-label="Stop and return to start" title="Stop and return to 0s">■</button>
       </div>
       {activeActionName&&<div className="timeline-tool-group linked-action-group"><span title={`Timeline is linked to ${activeActionName}`}>Action: <b>{activeActionName}</b></span><button className="timeline-update-action" onClick={onUpdateAction} title={`Replace ${activeActionName} with the edited poses and movement in this Timeline range`}>↻ Update Action</button></div>}
@@ -74,13 +77,13 @@ export function Timeline({p,time,setTime,selected,playing,onTogglePlayback,onSto
       </div>
       {tracks.map(([name,items,label])=><div className={`track ${selected===name?"active":""}`} key={name}><label title={label}>{label}</label><div>
         {items.map((k:any)=>{const token=`${name}:${k.id}`,chosen=selectedSet.has(token),auto=k.source==="AUTO_MOTION",modified=k.source==="AUTO_MOTION_MODIFIED";return <button key={k.id} data-track={name} data-id={k.id} className={`timeline-key ${chosen?"selected":""} ${auto?"auto-motion":""} ${modified?"auto-motion-modified":""}`} title={`${k.time.toFixed(3)}s${auto?" · Auto Motion":modified?" · Auto Motion · manually modified":""}`} style={{left:`${k.time/p.duration*100}%`,transform:drag?.ids.has(token)?`translateX(calc(-50% + ${drag.dx}px)) rotate(45deg)`:undefined}} onContextMenu={e=>{e.preventDefault();e.stopPropagation();if(!chosen)onSelectionChange([{track:name,id:k.id}],"replace");setMenu({x:e.clientX,y:e.clientY})}} onPointerDown={e=>{
-          e.stopPropagation();const ref={track:name,id:k.id};
+          e.stopPropagation();setTime(k.time);const ref={track:name,id:k.id};
           if(e.shiftKey){onSelectionChange([ref],"toggle");return}
           const active=chosen?selectedKeys:[ref];if(!chosen)onSelectionChange([ref],"replace");
           const el=e.currentTarget.parentElement!,start=e.clientX;let dx=0;
           const ids=new Set(active.map(x=>`${x.track}:${x.id}`));
           const move=(m:PointerEvent)=>{dx=m.clientX-start;setDrag({ids,dx})};
-          const up=()=>{removeEventListener("pointermove",move);removeEventListener("pointerup",up);setDrag(null);if(Math.abs(dx)>2)onMoveKeys(active,snap(k.time+dx/el.clientWidth*p.duration)-k.time)};
+          const up=()=>{removeEventListener("pointermove",move);removeEventListener("pointerup",up);setDrag(null);if(Math.abs(dx)>2){const target=Math.max(0,Math.min(p.duration,snap(k.time+dx/el.clientWidth*p.duration)));onMoveKeys(active,target-k.time);setTime(target)}};
           addEventListener("pointermove",move);addEventListener("pointerup",up);
         }}/>})}
         {name!=="camera"&&name!=="effects"&&name!=="speed"&&(p.motionReviews??[]).filter(i=>i.actorId===name&&i.status!=="resolved").map(issue=><button key={issue.id} className={`motion-issue-marker ${issue.status}`} style={{left:`${issue.time/p.duration*100}%`}} onPointerDown={e=>{e.stopPropagation();onIssue?.(issue.id)}}>{issue.status==="review"?"!":"·"}</button>)}

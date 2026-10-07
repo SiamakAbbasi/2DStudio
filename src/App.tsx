@@ -10,6 +10,7 @@ import {
   propTransformAt,
   sourceTimeAt,
   outputDuration,
+  outputTimeAtSource,
   transformAt,
   uid,
 } from "./animation";
@@ -28,7 +29,7 @@ import { effectParamsAt, upsertEffectKey } from "./effectAnimation";
 import {commitMasterClipSource} from "./masterSequence";
 import {restoreSceneDoc,sceneDoc} from "./sceneState";
 import {applyTimelineSequence,validateTimelineSequence,type TimelineSequence} from "./timelineCommands";
-import {authoredAutoMotionAnchors,clearAutoMotionKeys,detachAutoMotionKey,generateAutoMotionKeys,type AutoMotionDensity,type AutoMotionTiming} from "./autoMotion";
+import {authoredAutoMotionAnchors,autoMotionOrientationBreaks,clearAutoMotionKeys,detachAutoMotionKey,generateAutoMotionKeys,type AutoMotionDensity,type AutoMotionTiming} from "./autoMotion";
 import {PathPanel} from "./PathPanel";
 import {bakeMotionPath,createMotionPath,detachMotionPathKey,previewPathProject} from "./motionPath";
 import {applySelectionRetimePlan,detachManualKey,duplicateEntries,planSelectionRetime} from "./timelineAuthoring";
@@ -152,6 +153,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
       ),
     ),
     [playing, setPlaying] = useState(false),
+    [selectionPlayback,setSelectionPlayback]=useState<{start:number;end:number}|null>(null),
     [sel, setSel] = useState<string>(() => restoredSession?.selected ?? "a"),
     [selectedActors, setSelectedActors] = useState<string[]>(() => [
       restoredSession?.selected ?? "a",
@@ -232,7 +234,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
     [leftDrawer, setLeftDrawer] = useState<"scene" | "actions" | null>(null),
     [rightWidth, setRightWidth] = useState(() => +(localStorage.getItem("flip-ui-right-width") || 280)),
     [inspectorHidden, setInspectorHidden] = useState(false),
-    [rightTool,setRightTool]=useState<"transform"|"path"|"camera"|"effects"|"timing"|"background">("transform"),
+    [rightTool,setRightTool]=useState<"transform"|"layers"|"path"|"camera"|"effects"|"timing"|"background">("transform"),
     [library, setLibrary] = useState<Record<string, Project>>(() => {
       try {
         return JSON.parse(localStorage.getItem(LIBRARY_KEY) || "{}");
@@ -667,6 +669,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
     return () => cancelAnimationFrame(raf);
   }, [playing, p, timelineAudition, auditionSpeed]);
   useEffect(()=>{if(playing&&timelineAudition&&auditionRange&&time>=auditionRange.end){setPlaying(false);setTime(auditionRange.end);rt.current=auditionRange.end;last.current=0}},[playing,timelineAudition,auditionRange,time]);
+  useEffect(()=>{if(playing&&selectionPlayback&&time>=selectionPlayback.end){setPlaying(false);setTime(selectionPlayback.end);rt.current=outputTimeAtSource(p.speed,selectionPlayback.end);last.current=0;setSelectionPlayback(null)}},[playing,selectionPlayback,time,p.speed]);
   useEffect(()=>{if(pathPreview&&activePath&&time>=activePath.endTime){setPlaying(false);setPathPreview(false);setTime(activePath.endTime);rt.current=activePath.endTime;last.current=0}},[time,pathPreview,activePath]);
   const seek = (t: number) => {
     setTime(t);
@@ -675,9 +678,11 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
   };
   const stopPlayback = () => {
     setPlaying(false);
+    setSelectionPlayback(null);
     setPathPreview(false);
     seek(0);
   };
+  const toggleFullPlayback=()=>{setSelectionPlayback(null);setPlaying(value=>!value)};
   const addKey = (pose?: Pose) =>
     update((n) => {
       const tf = transformAt(n.tracks[sel], time);
@@ -807,7 +812,13 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
     n: Project,
     camera: ReturnType<typeof cameraAt>,
   ) => {
-    let key = n.camera.find((item) => Math.abs(item.time - time) < 0.025);
+    // Camera keys must be isolated. A loose time tolerance could silently
+    // mutate a neighbouring key instead of authoring the current playhead.
+    const selectedCameraId=timelineSelection.find(ref=>ref.track==="camera")?.id;
+    let key = selectedCameraId
+      ? n.camera.find(item=>item.id===selectedCameraId&&Math.abs(item.time-time)<.0005)
+      : undefined;
+    key??=n.camera.find((item) => Math.abs(item.time - time) < 0.0005);
     if (!key) {
       key = { id: uid(), time, easing: ease, ...cameraAt(n.camera, time) };
       n.camera.push(key);
@@ -1402,6 +1413,18 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
           : track === "effects"
             ? project.effects
             : project.speed;
+  const selectedPlaybackRange=()=>{
+    const times=timelineSelection.map(ref=>timelineTrack(p,ref.track).find(key=>key.id===ref.id)?.time).filter((value):value is number=>Number.isFinite(value));
+    if(times.length<2)return null;
+    const start=Math.min(...times),end=Math.max(...times);
+    return end-start>.0005?{start,end}:null;
+  };
+  const playTimelineSelection=()=>{
+    const range=selectedPlaybackRange();
+    if(!range)return;
+    setPlaying(false);setTimelineAudition(null);setPathPreview(false);setSelectionPlayback(range);setTime(range.start);rt.current=outputTimeAtSource(p.speed,range.start);last.current=0;
+    window.setTimeout(()=>setPlaying(true),0);
+  };
   const canRetimeTimelineSelection=timelineSelection.length>1&&new Set(timelineSelection.map(ref=>timelineTrack(p,ref.track).find(key=>key.id===ref.id)?.time).filter((value):value is number=>typeof value==="number")).size>1;
   const retimeTimelineSelection=(speed:number)=>{
     if(!canRetimeTimelineSelection||Math.abs(speed-1)<.000001)return;
@@ -1670,7 +1693,6 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
   const buildAutoMotion=(source:Project,editor:AutoMotionEditorState)=>{
     const next=structuredClone(source),track=next.tracks[editor.actor]??[],ids=editor.anchorIds?new Set(editor.anchorIds):undefined,anchors=authoredAutoMotionAnchors(track,editor.start,editor.end,ids);
     if(anchors.length<2)throw new Error("Auto Motion needs at least two authored Pose keyframes.");
-    for(let index=0;index<anchors.length-1;index++){const a=transformAt(track,anchors[index].time),b=transformAt(track,anchors[index+1].time);if(a.flipH!==b.flipH||a.flipV!==b.flipV)throw new Error("These anchors change facing/orientation. Add an authored transition pose before generating Auto Motion.");}
     const groupId=editor.groupId??`auto_motion_${uid()}`,clean=clearAutoMotionKeys(track,editor.start,editor.end,editor.groupId),freshAnchors=authoredAutoMotionAnchors(clean,editor.start,editor.end,ids),generated=generateAutoMotionKeys(freshAnchors,editor.easing,editor.density,groupId,uid);
     next.tracks[editor.actor]=[...clean,...generated].sort((a,b)=>a.time-b.time);return{project:next,count:generated.length,anchors:freshAnchors.length,groupId};
   };
@@ -1771,7 +1793,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
           data-tip={playing ? "Pause" : "Play"}
           title={playing ? "Pause playback" : "Play scene"}
           aria-label={playing ? "Pause" : "Play"}
-          onClick={() => setPlaying((v) => !v)}
+          onClick={toggleFullPlayback}
         >
           {playing ? "Ⅱ" : "▶"}
         </button>
@@ -2610,9 +2632,10 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         <aside className={`props tool-drawer right-tool-${rightTool} inspector-${selectedEffect ? "effect" : selectedProp ? "prop" : transformMode === "camera" ? "camera" : "character"}`}>
           <ToolDrawerHeader
             eyebrow=""
-            title={{transform:"Transform",path:"Path",camera:"Camera",effects:"Effects",timing:"Timing",background:"Background"}[rightTool]}
+            title={{transform:"Transform",layers:"Layers",path:"Path",camera:"Camera",effects:"Effects",timing:"Timing",background:"Background"}[rightTool]}
             subtitle={rightTool==="transform"
               ? (selectedProp?p.props?.find(x=>x.id===selectedProp)?.name:p.characters.find(c=>c.id===sel)?.name)
+              : rightTool==="layers"?"Select and move scene objects"
               : rightTool==="path"
                 ? `Motion path for ${p.characters.find(c=>c.id===(activePath?.targetId??sel))?.name??p.props?.find(x=>x.id===activePath?.targetId)?.name??"selection"}`
                 : rightTool==="camera"?"Scene Camera"
@@ -2621,6 +2644,13 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
                 : "Scene Appearance"}
             onClose={()=>setInspectorHidden(true)}
           />
+          <details open className="scene-layers-details">
+            <summary>Scene Layers</summary>
+            <p className="format-readout">Select any Actor, Prop or FX object. The playhead follows timed FX automatically.</p>
+            <div className="scene-layer-group"><b>Characters</b>{p.characters.map(actor=><button key={actor.id} className={`scene-layer-row ${!selectedEffect&&!selectedProp&&sel===actor.id?"selected":""}`} onClick={()=>{setSel(actor.id);setSelectedActors([actor.id]);setSelectedProp(null);setSelectedEffect(null);setTransformMode("move")}}><span>♙</span><span><b>{actor.name}</b><small>{actor.visible?"Visible":"Hidden"}{actor.locked?" · Locked":""}</small></span></button>)}</div>
+            <div className="scene-layer-group"><b>Props</b>{(p.props??[]).map(prop=><button key={prop.id} className={`scene-layer-row ${selectedProp===prop.id?"selected":""}`} onClick={()=>{setSelectedProp(prop.id);setSelectedEffect(null);setTransformMode("move")}}><span>⬡</span><span><b>{prop.name}</b><small>{prop.type}{prop.locked?" · Locked":""}</small></span></button>)}{!(p.props??[]).length&&<small className="scene-layer-empty">No props</small>}</div>
+            <div className="scene-layer-group"><b>Effects</b>{[...p.effects].sort((a,b)=>a.time-b.time).map(effect=><button key={effect.id} className={`scene-layer-row ${selectedEffect===effect.id?"selected":""}`} onClick={()=>{seek(effect.time);setSelectedEffect(effect.id);setSelectedProp(null);setTransformMode("move");setRightTool("effects")}}><span>✦</span><span><b>{effect.preset??effect.type}</b><small>{effect.type} · {effect.time.toFixed(2)}s</small></span></button>)}{!p.effects.length&&<small className="scene-layer-empty">No effects</small>}</div>
+          </details>
           {selectedEffect && (() => {
             const effect=p.effects.find((item)=>item.id===selectedEffect);
             if(!effect)return null;
@@ -3292,6 +3322,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         </aside>
         <nav className="tool-rail right-tool-rail" aria-label="Authoring tools">
           <button className={!inspectorHidden&&rightTool==="transform"?"active":""} data-tip="Transform Inspector" onClick={()=>{if(!inspectorHidden&&rightTool==="transform")setInspectorHidden(true);else{setRightTool("transform");setInspectorHidden(false)}}}>✥<small>Transform</small></button>
+          <button className={!inspectorHidden&&rightTool==="layers"?"active":""} data-tip="Scene Layers" onClick={()=>{if(!inspectorHidden&&rightTool==="layers")setInspectorHidden(true);else{setRightTool("layers");setInspectorHidden(false)}}}>▤<small>Layers</small></button>
           <button className={!inspectorHidden&&rightTool==="path"?"active":""} data-tip="Motion Path" onClick={()=>{if(!inspectorHidden&&rightTool==="path")setInspectorHidden(true);else{setRightTool("path");setInspectorHidden(false)}}}>〰<small>Path</small></button>
           <button className={!inspectorHidden&&rightTool==="camera"?"active":""} data-tip="Camera Inspector" onClick={()=>{if(!inspectorHidden&&rightTool==="camera")setInspectorHidden(true);else{setRightTool("camera");setTransformMode("camera");setInspectorHidden(false)}}}>▣<small>Camera</small></button>
           <button className={!inspectorHidden&&rightTool==="effects"?"active":""} data-tip="Scene Effects" onClick={()=>{if(!inspectorHidden&&rightTool==="effects")setInspectorHidden(true);else{setRightTool("effects");setInspectorHidden(false)}}}>✦<small>Effects</small></button>
@@ -3320,7 +3351,9 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
         setTime={seek}
         selected={sel}
         playing={playing}
-        onTogglePlayback={()=>setPlaying(value=>!value)}
+        onTogglePlayback={toggleFullPlayback}
+        onPlaySelection={playTimelineSelection}
+        selectionPlayback={Boolean(selectionPlayback)}
         onStopPlayback={stopPlayback}
         activeActionName={linkedActionContext?.name}
         onUpdateAction={updateAppliedActionFromTimeline}
@@ -3378,7 +3411,7 @@ export default function App({ initialProject, onProjectChange, saveStatus, onExi
           </article>
         </div>
       )}
-      {autoMotionEditor&&(()=>{const track=p.tracks[autoMotionEditor.actor]??[],anchors=authoredAutoMotionAnchors(track,autoMotionEditor.start,autoMotionEditor.end,autoMotionEditor.anchorIds?new Set(autoMotionEditor.anchorIds):undefined),generated=track.filter(key=>key.source==="AUTO_MOTION"&&key.time>=autoMotionEditor.start&&key.time<=autoMotionEditor.end).length,modified=track.filter(key=>key.source==="AUTO_MOTION_MODIFIED"&&key.time>=autoMotionEditor.start&&key.time<=autoMotionEditor.end).length;return <div className="help-backdrop" onClick={()=>{setAutoMotionEditor(null);setAutoMotionPreview(null)}}><article className="action-editor auto-motion-editor" onClick={event=>event.stopPropagation()}><header><div><small>POSE-TO-POSE GENERATOR</small><h2>✨ Auto Motion</h2></div><button onClick={()=>{setAutoMotionEditor(null);setAutoMotionPreview(null)}}>×</button></header><div className="auto-motion-summary"><span>Actor <b>{p.characters.find(actor=>actor.id===autoMotionEditor.actor)?.name}</b></span><span>Range <b>{autoMotionEditor.start.toFixed(3)}s → {autoMotionEditor.end.toFixed(3)}s</b></span><span>Authored Poses <b>{anchors.length}</b></span>{generated>0&&<span>Generated <b>{generated}</b></span>}</div><label>Timing / Easing<select value={autoMotionEditor.easing} onChange={event=>{setAutoMotionPreview(null);setAutoMotionEditor(old=>old&&({...old,easing:event.target.value as AutoMotionTiming}))}}><option value="linear">Linear</option><option value="ease-in">Ease In</option><option value="ease-out">Ease Out</option><option value="ease-in-out">Ease In-Out</option></select></label><label>Density<select value={autoMotionEditor.density} onChange={event=>{setAutoMotionPreview(null);setAutoMotionEditor(old=>old&&({...old,density:event.target.value as AutoMotionDensity}))}}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>{modified>0&&<p className="auto-motion-warning">{modified} manually edited generated frame(s) are protected. Clear and Regenerate will preserve them as authored anchors.</p>}<footer><button onClick={()=>{setAutoMotionEditor(null);setAutoMotionPreview(null)}}>Cancel</button><button onClick={previewAutoMotion}>{autoMotionPreview?"Refresh Preview":"Preview"}</button>{generated>0&&<button onClick={generateAutoMotion}>Regenerate</button>}<button className="primary" onClick={generateAutoMotion}>Generate</button></footer></article></div>})()}
+      {autoMotionEditor&&(()=>{const track=p.tracks[autoMotionEditor.actor]??[],anchors=authoredAutoMotionAnchors(track,autoMotionEditor.start,autoMotionEditor.end,autoMotionEditor.anchorIds?new Set(autoMotionEditor.anchorIds):undefined),orientationBreaks=autoMotionOrientationBreaks(anchors),generated=track.filter(key=>key.source==="AUTO_MOTION"&&key.time>=autoMotionEditor.start&&key.time<=autoMotionEditor.end).length,modified=track.filter(key=>key.source==="AUTO_MOTION_MODIFIED"&&key.time>=autoMotionEditor.start&&key.time<=autoMotionEditor.end).length;return <div className="help-backdrop" onClick={()=>{setAutoMotionEditor(null);setAutoMotionPreview(null)}}><article className="action-editor auto-motion-editor" onClick={event=>event.stopPropagation()}><header><div><small>POSE-TO-POSE GENERATOR</small><h2>✨ Auto Motion</h2></div><button onClick={()=>{setAutoMotionEditor(null);setAutoMotionPreview(null)}}>×</button></header><div className="auto-motion-summary"><span>Actor <b>{p.characters.find(actor=>actor.id===autoMotionEditor.actor)?.name}</b></span><span>Range <b>{autoMotionEditor.start.toFixed(3)}s → {autoMotionEditor.end.toFixed(3)}s</b></span><span>Authored Poses <b>{anchors.length}</b></span>{generated>0&&<span>Generated <b>{generated}</b></span>}</div><label>Timing / Easing<select value={autoMotionEditor.easing} onChange={event=>{setAutoMotionPreview(null);setAutoMotionEditor(old=>old&&({...old,easing:event.target.value as AutoMotionTiming}))}}><option value="linear">Linear</option><option value="ease-in">Ease In</option><option value="ease-out">Ease Out</option><option value="ease-in-out">Ease In-Out</option></select></label><label>Density<select value={autoMotionEditor.density} onChange={event=>{setAutoMotionPreview(null);setAutoMotionEditor(old=>old&&({...old,density:event.target.value as AutoMotionDensity}))}}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>{orientationBreaks.length>0&&<p className="auto-motion-warning">{orientationBreaks.length} facing/orientation {orientationBreaks.length===1?"boundary":"boundaries"} will stay authored. Auto Motion will generate around {orientationBreaks.length===1?"it":"them"}.</p>}{modified>0&&<p className="auto-motion-warning">{modified} manually edited generated frame(s) are protected. Clear and Regenerate will preserve them as authored anchors.</p>}<footer><button onClick={()=>{setAutoMotionEditor(null);setAutoMotionPreview(null)}}>Cancel</button><button onClick={previewAutoMotion}>{autoMotionPreview?"Refresh Preview":"Preview"}</button>{generated>0&&<button onClick={generateAutoMotion}>Regenerate</button>}<button className="primary" onClick={generateAutoMotion}>Generate</button></footer></article></div>})()}
       {newProjectOpen && (
         <div className="help-backdrop" onClick={() => setNewProjectOpen(false)}>
           <article

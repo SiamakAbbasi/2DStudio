@@ -28,10 +28,21 @@ export function authoredAutoMotionAnchors(track:PoseKeyframe[],start:number,end:
   const min=Math.min(...selected.map(key=>key.time)),max=Math.max(...selected.map(key=>key.time));
   return eligible.filter(key=>key.time>=min&&key.time<=max).sort((a,b)=>a.time-b.time);
 }
+export function autoMotionOrientationBreaks(anchors:PoseKeyframe[]){
+  const breaks:{start:PoseKeyframe;end:PoseKeyframe}[]=[];
+  for(let index=0;index<anchors.length-1;index++){
+    const start=anchors[index],end=anchors[index+1];
+    if((start.flipH??false)!==(end.flipH??false)||(start.flipV??false)!==(end.flipV??false))breaks.push({start,end});
+  }
+  return breaks;
+}
 export function generateAutoMotionKeys(anchors:PoseKeyframe[],easing:AutoMotionTiming,density:AutoMotionDensity,groupId:string,idFactory:()=>string){
   const generated:PoseKeyframe[]=[];
   for(let index=0;index<anchors.length-1;index++){
     const a=anchors[index],b=anchors[index+1],duration=b.time-a.time,spacing=AUTO_MOTION_SPACING[density];
+    // Facing is a discrete authored state. Treat a change as a cut/hold boundary
+    // instead of inventing an in-between flip or rejecting the entire selection.
+    if((a.flipH??false)!==(b.flipH??false)||(a.flipV??false)!==(b.flipV??false))continue;
     if(duration<spacing*1.35)continue;
     const steps=Math.ceil(duration/spacing);
     for(let step=1;step<steps;step++){
