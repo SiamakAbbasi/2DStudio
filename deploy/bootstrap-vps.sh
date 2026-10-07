@@ -23,6 +23,13 @@ docker compose --env-file .env.production -f docker-compose.prod.yml ps
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
   ufw allow "${APP_PORT}/tcp" >/dev/null
 fi
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  firewall-cmd --permanent --add-port="${APP_PORT}/tcp" >/dev/null
+  firewall-cmd --reload >/dev/null
+fi
+if command -v iptables >/dev/null 2>&1; then
+  iptables -C INPUT -p tcp --dport "${APP_PORT}" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport "${APP_PORT}" -j ACCEPT
+fi
 
 attempt=0
 until curl -fsS "http://127.0.0.1:${APP_PORT}/api/health" >/dev/null; do
