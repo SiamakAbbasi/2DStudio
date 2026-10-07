@@ -1,0 +1,47 @@
+name: Deploy develop to VPS
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: vps-develop
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: development
+    steps:
+      - name: Configure deployment key
+        shell: bash
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' '${{ secrets.VPS_SSH_KEY }}' > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H '${{ secrets.VPS_HOST }}' >> ~/.ssh/known_hosts
+      - name: Deploy develop
+        shell: bash
+        run: |
+          ssh root@'${{ secrets.VPS_HOST }}' 'set -eu
+            if [ ! -d /opt/2d-flip-studio/.git ]; then
+              git clone --branch develop --single-branch https://github.com/SiamakAbbasi/2DStudio.git /opt/2d-flip-studio
+            fi
+            cd /opt/2d-flip-studio
+            git fetch origin develop
+            git checkout develop
+            git reset --hard origin/develop
+            sh deploy/bootstrap-vps.sh'

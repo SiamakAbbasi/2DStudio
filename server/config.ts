@@ -23,6 +23,7 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL ?? "postgresql://postgres@localhost:5432/2dstudio",
   sessionSecret: process.env.SESSION_SECRET ?? "",
   port: integer("PORT", 5175),
+  host: process.env.HOST ?? "127.0.0.1",
   appOrigin: process.env.APP_ORIGIN ?? "http://127.0.0.1:5174",
   generalRateLimit: integer("GENERAL_RATE_LIMIT_PER_MINUTE", 100),
   authRateLimit: integer("AUTH_RATE_LIMIT_PER_MINUTE", 5),
